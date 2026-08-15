@@ -55,6 +55,30 @@ describe("ClientMessageSchema", () => {
       }),
     ).toThrow();
   });
+
+  it("accepts a media chunk with exactly 262,144 decoded bytes", () => {
+    expect(() =>
+      ClientMessageSchema.parse({
+        type: "media_chunk",
+        sessionId,
+        mediaId: "m1",
+        sequence: 0,
+        data: Buffer.alloc(262_144).toString("base64"),
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects a media chunk with 262,145 decoded bytes", () => {
+    expect(() =>
+      ClientMessageSchema.parse({
+        type: "media_chunk",
+        sessionId,
+        mediaId: "m1",
+        sequence: 0,
+        data: Buffer.alloc(262_145).toString("base64"),
+      }),
+    ).toThrow();
+  });
 });
 
 describe("HostMessageSchema", () => {

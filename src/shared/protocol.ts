@@ -23,7 +23,12 @@ const Base64ChunkSchema = z
   .max(Math.ceil(NATIVE_CHUNK_BYTES / 3) * 4)
   .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, {
     message: "Chunk data must be base64",
-  });
+  })
+  .refine((value) => {
+    const paddingBytes = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+    const decodedBytes = (value.length / 4) * 3 - paddingBytes;
+    return decodedBytes <= NATIVE_CHUNK_BYTES;
+  }, "Chunk data exceeds the decoded byte limit");
 
 const HttpSourceSchema = z.string().trim().max(2_048).transform((value, context) => {
   try {
