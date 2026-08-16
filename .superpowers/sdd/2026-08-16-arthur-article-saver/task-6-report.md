@@ -157,3 +157,22 @@ facades; production uses WXT's unified `browser` API.
   `action ?? browserAction` fallback, in addition to the browserAction-only
   runtime regression tests.
 - `rtk git diff --check` passes.
+
+## Review fix round 4
+
+### RED → GREEN evidence
+
+- Missing active-tab identity: RED showed both an empty `tabs.query` result and
+  a returned tab without an ID taking the ordinary success path, rendering “No
+  recent save issues,” leaving Retry enabled, and retaining the stale popup.
+  GREEN routes both resolved-but-unusable results through the same terminal
+  recovery as query/storage rejection: a typed safe message, disabled and
+  nonfunctional Retry, and best-effort clearing of the exact URL-hinted tab
+  popup. A rejected popup-clear attempt does not reject page readiness.
+
+### Verification
+
+- GREEN `rtk pnpm test -- entrypoints` passes 15 files and 94 tests.
+- Standard typecheck and Chrome MV3, Edge MV3, and Firefox MV2 builds pass.
+- Generated manifest assertions, Firefox action-fallback bundle assertions,
+  and `rtk git diff --check` pass.

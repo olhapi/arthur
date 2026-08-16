@@ -170,4 +170,38 @@ describe("mountStatusPage", () => {
     expect(document.querySelector<HTMLButtonElement>("#retry-save")?.disabled).toBe(true);
     expect(clearPopup).toHaveBeenCalledWith(17);
   });
+
+  it.each([
+    ["no active tab", []],
+    ["an active tab without an ID", [{ id: undefined }]],
+  ])("renders terminal recovery UI for %s", async (_name, tabs) => {
+    document.body.innerHTML = '<main><div id="status-details" aria-live="polite"></div><button id="retry-save">Retry save</button></main>';
+    const browser = {
+      tabs: { query: vi.fn().mockResolvedValue(tabs) },
+      storage: { local: { get: vi.fn() } },
+    };
+    const retrySave = vi.fn();
+    const clearPopup = _name === "no active tab"
+      ? vi.fn().mockResolvedValue(undefined)
+      : vi.fn().mockRejectedValue(new Error("popup unavailable"));
+    const page = mountStatusPage(document, {
+      loadStatus: () => loadStatusForActiveTab(browser),
+      retrySave,
+      tabIdHint: 17,
+      clearPopup,
+    });
+
+    await expect(page.ready).resolves.toBeUndefined();
+
+    const button = document.querySelector<HTMLButtonElement>("#retry-save")!;
+    expect(document.querySelector("#status-details")?.textContent).toBe(
+      "Status unavailable: Arthur could not load this tab's status.",
+    );
+    expect(document.querySelector<HTMLElement>("#status-details")?.dataset.kind).toBe("error");
+    expect(button.disabled).toBe(true);
+    button.click();
+    expect(retrySave).not.toHaveBeenCalled();
+    expect(clearPopup).toHaveBeenCalledWith(17);
+    expect(browser.storage.local.get).not.toHaveBeenCalled();
+  });
 });

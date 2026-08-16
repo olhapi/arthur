@@ -86,6 +86,18 @@ export function mountStatusPage(document: Document, dependencies: StatusDependen
     details.dataset.kind = "error";
     details.textContent = `Retry failed: ${message}`;
   };
+  const renderLoadFailure = async (): Promise<void> => {
+    retryTabId = undefined;
+    details.replaceChildren();
+    details.dataset.kind = "error";
+    details.textContent = "Status unavailable: Arthur could not load this tab's status.";
+    retry.disabled = true;
+    try {
+      await dependencies.clearPopup?.(dependencies.tabIdHint);
+    } catch {
+      // A stale popup is non-critical once this page has reached terminal UI.
+    }
+  };
 
   retry.addEventListener("click", async () => {
     retry.disabled = true;
@@ -104,10 +116,14 @@ export function mountStatusPage(document: Document, dependencies: StatusDependen
   });
 
   const ready = dependencies.loadStatus().then(
-    (loaded) => {
-      retryTabId = loaded?.tabId;
-      const candidate = statusFrom(loaded?.status);
-      const status = candidate?.tabId === loaded?.tabId ? candidate : undefined;
+    async (loaded) => {
+      if (loaded === undefined) {
+        await renderLoadFailure();
+        return;
+      }
+      retryTabId = loaded.tabId;
+      const candidate = statusFrom(loaded.status);
+      const status = candidate?.tabId === loaded.tabId ? candidate : undefined;
       details.replaceChildren();
       if (status === undefined || status.details.length === 0) {
         details.textContent = "No recent save issues.";
@@ -122,12 +138,7 @@ export function mountStatusPage(document: Document, dependencies: StatusDependen
       }
       details.append(list);
     },
-    async () => {
-      details.dataset.kind = "error";
-      details.textContent = "Status unavailable: Arthur could not load this tab's status.";
-      retry.disabled = true;
-      await dependencies.clearPopup?.(dependencies.tabIdHint).catch(() => undefined);
-    },
+    renderLoadFailure,
   );
   return { ready };
 }
