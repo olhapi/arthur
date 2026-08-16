@@ -55,5 +55,6 @@ The direct framed hello and destination test succeeded with the minimal environm
 
 - Bounded uninstall now treats a missing allowlisted target parent as absent, while preserving rejection of a symlink or non-directory ancestor.
 - The verifier rejects and terminates a response immediately when its four-byte header declares a payload above 1 MiB, while allowing exactly 1 MiB plus the four-byte frame prefix.
-- Extended focused coverage for forged uninstall plans, manifest and ancestor symlinks, all staging open/write/fsync/close failure paths, malformed manifest variants, binary-mode and payload inventory checks, partial/absent uninstall, oversized headers, and destination mismatch.
-- Final focused lifecycle suite: 113 tests passing.
+- Extended focused coverage for forged uninstall plans, manifest and ancestor symlinks, all staging open/write/fsync/close failure paths and cleanup, malformed manifest variants including wrong paths, missing/symlink release sources, binary-mode and payload inventory checks, partial/absent uninstall, oversized headers, and destination mismatch.
+- Added a committed integration test that uses `native/target/release/arthur-native-host` with a fake home for install, real minimal-PATH framed hello, canonical destination verification, bounded uninstall, and absence verification. It fails clearly if `pnpm build:native` has not produced the release binary.
+- Final focused lifecycle suite: 114 tests passing.

@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { chmod, mkdtemp, mkdir, realpath, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, realpath, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -111,6 +111,10 @@ describe("native-host verification", () => {
       .mockImplementationOnce(spawning({ type: "hello_result", requestId: "verify-hello", protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" }))
       .mockImplementationOnce(spawning({ type: "test_destination_result", requestId: "verify-destination", destination: canonicalDestination, writable: true }));
     await expect(verifyInstall({ home, platform: "darwin", destination, spawn })).resolves.toMatchObject({ destination: canonicalDestination });
+    const mismatch = vi.fn()
+      .mockImplementationOnce(spawning({ type: "hello_result", requestId: "verify-hello", protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" }))
+      .mockImplementationOnce(spawning({ type: "test_destination_result", requestId: "verify-destination", destination: `${canonicalDestination}-wrong`, writable: true }));
+    await expect(verifyInstall({ home, platform: "darwin", destination, spawn: mismatch })).rejects.toThrow(/exact writable destination/i);
   });
 
   it("rejects bad manifest JSON, IDs, paths, modes, nonregular binaries, and extra payloads", async () => {
@@ -121,6 +125,10 @@ describe("native-host verification", () => {
     const badId = await installedFixture();
     await writeFile(badId.plan.manifests[1]!.destination, JSON.stringify({ ...badId.plan.manifests[1]!.contents, allowed_origins: ["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"] }));
     await expect(verifyInstall({ home: badId.home, platform: "darwin" })).rejects.toThrow(/manifest/i);
+
+    const badPath = await installedFixture();
+    await writeFile(badPath.plan.manifests[2]!.destination, JSON.stringify({ ...badPath.plan.manifests[2]!.contents, path: "/not/arthur-native-host" }));
+    await expect(verifyInstall({ home: badPath.home, platform: "darwin" })).rejects.toThrow(/manifest/i);
 
     const badMode = await installedFixture();
     await chmod(badMode.plan.payloads[0]!.destination, 0o700);
@@ -134,5 +142,22 @@ describe("native-host verification", () => {
     const extra = await installedFixture();
     await writeFile(path.join(path.dirname(extra.plan.payloads[0]!.destination), "extra"), "extra");
     await expect(verifyInstall({ home: extra.home, platform: "darwin" })).rejects.toThrow(/exactly one/i);
+  });
+
+  it("uses the built release binary through the complete fake-home lifecycle", async () => {
+    const releaseBinary = path.resolve("native/target/release/arthur-native-host");
+    await expect(lstat(releaseBinary)).resolves.toMatchObject({ isFile: expect.any(Function) });
+    const root = await mkdtemp(path.join(tmpdir(), "arthur-native-host-real-"));
+    const home = path.join(root, "home");
+    const destination = path.join(root, "destination");
+    await mkdir(home);
+    await mkdir(destination);
+    const plan = await buildInstallPlan({ home, nativeBinaryPath: releaseBinary, platform: "darwin" });
+    await applyInstallPlan(plan, { home, platform: "darwin" });
+    await expect(verifyInstall({ home, platform: "darwin", destination })).resolves.toMatchObject({ installed: true });
+    const { applyUninstallPlan, buildUninstallPlan } = await import("./uninstall.mjs");
+    const uninstall = await buildUninstallPlan({ home, platform: "darwin" });
+    await applyUninstallPlan(uninstall, { home, platform: "darwin" });
+    await expect(verifyInstall({ home, platform: "darwin", expectAbsent: true })).resolves.toMatchObject({ absent: true });
   });
 });

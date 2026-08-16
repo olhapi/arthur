@@ -1,5 +1,5 @@
 import * as nodeFs from "node:fs/promises";
-import { mkdtemp, mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -47,6 +47,10 @@ describe("native-host installation plan", () => {
     await symlink("/tmp/not-arthur", installed);
     await expect(buildInstallPlan({ ...clean, platform: "darwin" })).rejects.toThrow(/symlink/i);
     await expect(buildInstallPlan({ ...clean, platform: "darwin", targets: { binary: "/tmp/escape" } })).rejects.toThrow(/allowlist/i);
+    await expect(buildInstallPlan({ ...clean, nativeBinaryPath: path.join(clean.repositoryPath, "missing"), platform: "darwin" })).rejects.toThrow(/missing/i);
+    const sourceLink = path.join(clean.repositoryPath, "source-link");
+    await symlink(clean.nativeBinaryPath, sourceLink);
+    await expect(buildInstallPlan({ ...clean, nativeBinaryPath: sourceLink, platform: "darwin" })).rejects.toThrow(/symlink/i);
   });
 
   it("atomically installs only the binary and browser manifests", async () => {
@@ -124,6 +128,13 @@ describe("native-host installation plan", () => {
     await symlink("/tmp", path.join(ancestor.home, "Library"));
     const ancestorPlan = await buildInstallPlan({ ...ancestor, platform: "darwin" });
     await expect(applyInstallPlan(ancestorPlan, { home: ancestor.home, platform: "darwin" })).rejects.toThrow(/directory/i);
+
+    const nonDirectory = await fixture();
+    const nonDirectoryPlan = await buildInstallPlan({ ...nonDirectory, platform: "darwin" });
+    await writeFile(path.join(nonDirectory.home, "Library"), "not-a-directory");
+    await expect(applyInstallPlan(nonDirectoryPlan, { home: nonDirectory.home, platform: "darwin" })).rejects.toThrow(/directory/i);
+    const bounded = await buildUninstallPlan({ home: nonDirectory.home, platform: "darwin" });
+    await expect(applyUninstallPlan(bounded, { home: nonDirectory.home, platform: "darwin" })).rejects.toThrow(/directory/i);
   });
 
   it("does not rename when exclusive staging write, fsync, or close fails", async () => {
@@ -131,11 +142,13 @@ describe("native-host installation plan", () => {
       const options = await fixture();
       const plan = await buildInstallPlan({ ...options, platform: "darwin" });
       let openCount = 0;
+      const openCalls: unknown[][] = [];
       const rename = vi.fn(nodeFs.rename);
       const fs = {
         ...nodeFs,
         rename,
         open: async (...args: Parameters<typeof nodeFs.open>) => {
+          openCalls.push(args);
           openCount += 1;
           if (failure === "open" && openCount === 2) throw new Error("exclusive staging open failed");
           const handle = await nodeFs.open(...args);
@@ -150,6 +163,8 @@ describe("native-host installation plan", () => {
       await expect(applyInstallPlan(plan, { home: options.home, platform: "darwin", fs })).rejects.toThrow(failure === "open" ? /open failed/i : new RegExp(`${failure} failed`, "i"));
       expect(rename).not.toHaveBeenCalled();
       await expect(readFile(plan.payloads[0]!.destination)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(openCalls.some((arguments_) => arguments_[1] === "wx")).toBe(true);
+      expect((await readdir(path.dirname(plan.payloads[0]!.destination))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
     }
   });
 });
