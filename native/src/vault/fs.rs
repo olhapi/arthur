@@ -2,8 +2,8 @@ use super::{VaultError, names::validate_basename};
 #[cfg(target_os = "macos")]
 use rustix::fs::fcntl_fullfsync;
 use rustix::fs::{
-    AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags, flock, fstat, fsync, mkdirat,
-    openat, renameat, statat, unlinkat,
+    AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags, flock, fstat, fsync, linkat,
+    mkdirat, openat, renameat, statat, unlinkat,
 };
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use rustix::fs::{RenameFlags, renameat_with};
@@ -274,7 +274,7 @@ pub(super) fn create_exclusive_file(root: &OwnedFd, name: &str) -> Result<File, 
     let fd = openat(
         root,
         name,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::RUSR | Mode::WUSR,
     )
     .map_err(|error| match error {
@@ -338,31 +338,6 @@ pub(super) fn read_bounded_regular_file(
     read_open_file_prefix(&mut file, maximum_bytes)
 }
 
-fn valid_stage_uuid(value: &str) -> bool {
-    let value = value.as_bytes();
-    if value.len() != 36
-        || !value
-            .iter()
-            .copied()
-            .enumerate()
-            .all(|(index, byte)| match index {
-                8 | 13 | 18 | 23 => byte == b'-',
-                _ => byte.is_ascii_hexdigit(),
-            })
-    {
-        return false;
-    }
-    let lower = String::from_utf8_lossy(value).to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "00000000-0000-0000-0000-000000000000" | "ffffffff-ffff-ffff-ffff-ffffffffffff"
-    ) {
-        return true;
-    }
-    matches!(value[14].to_ascii_lowercase(), b'1'..=b'8')
-        && matches!(value[19].to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b')
-}
-
 fn ownership_marker_bytes(session_id: &str) -> Vec<u8> {
     format!("arthur-stage-owner-v1\n{session_id}\n").into_bytes()
 }
@@ -371,7 +346,7 @@ pub(super) fn create_stage_ownership_marker(
     stage: &OwnedFd,
     session_id: &str,
 ) -> Result<(), VaultError> {
-    if !valid_stage_uuid(session_id) {
+    if !crate::validation::zod_uuid(session_id) {
         return Err(VaultError::InvalidTransition);
     }
     write_private_metadata(
@@ -397,7 +372,7 @@ pub(super) fn stage_has_valid_ownership_marker(
     else {
         return false;
     };
-    valid_stage_uuid(session_id)
+    crate::validation::zod_uuid(session_id)
         && expected_session.is_none_or(|expected| expected == session_id)
         && bytes == ownership_marker_bytes(session_id)
 }
@@ -408,6 +383,26 @@ pub(super) fn remove_owned_regular_child(root: &OwnedFd, name: &str) -> Result<(
     if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
         return Err(VaultError::UnsafeChild);
     }
+    unlinkat(root, name, AtFlags::empty()).map_err(|_| VaultError::Io)?;
+    sync_directory(root)
+}
+
+pub(super) fn remove_child_matching_open_file(
+    root: &OwnedFd,
+    name: &str,
+    expected: &File,
+) -> Result<(), VaultError> {
+    validate_basename(name)?;
+    let current = open_regular_file(root, name)?;
+    let expected_metadata = fstat(expected).map_err(|_| VaultError::Io)?;
+    let current_metadata = fstat(&current).map_err(|_| VaultError::Io)?;
+    if expected_metadata.st_dev != current_metadata.st_dev
+        || expected_metadata.st_ino != current_metadata.st_ino
+        || expected_metadata.st_size != current_metadata.st_size
+    {
+        return Err(VaultError::UnsafeChild);
+    }
+    drop(current);
     unlinkat(root, name, AtFlags::empty()).map_err(|_| VaultError::Io)?;
     sync_directory(root)
 }
@@ -481,6 +476,21 @@ pub(super) fn rename_exchange_between(
     Err(VaultError::Io)
 }
 
+pub(super) fn hard_link_no_replace_between(
+    from_root: &OwnedFd,
+    from: &str,
+    to_root: &OwnedFd,
+    to: &str,
+) -> Result<(), VaultError> {
+    validate_basename(from)?;
+    validate_basename(to)?;
+    linkat(from_root, from, to_root, to, AtFlags::empty()).map_err(|error| match error {
+        Errno::EXIST => VaultError::AttachmentConflict,
+        _ => VaultError::Io,
+    })?;
+    sync_directory(to_root)
+}
+
 #[allow(dead_code)]
 pub(super) fn remove_child(root: &OwnedFd, name: &str) -> Result<(), VaultError> {
     validate_basename(name)?;
@@ -529,7 +539,7 @@ pub(super) struct ReaperedStage {
 }
 
 fn internal_stage_temp_name(name: &str) -> bool {
-    ["media-", "note-"].iter().any(|prefix| {
+    ["media-", "note-", "old-note-"].iter().any(|prefix| {
         name.strip_prefix(prefix)
             .is_some_and(|tail| !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit()))
     })
@@ -579,17 +589,22 @@ pub(super) fn claim_marked_stage_reaper(
 }
 
 pub(super) fn remove_owned_stage_payload(stage: &OwnedFd) -> Result<(), VaultError> {
-    for child in direct_children(stage)? {
+    let children = direct_children(stage)?;
+    let mut opened = Vec::new();
+    for child in &children {
         if child == STAGE_OWNER_MARKER {
             continue;
         }
         if child == EXCHANGE_JOURNAL {
             return Err(VaultError::InvalidTransition);
         }
-        if !internal_stage_temp_name(&child) {
+        if !internal_stage_temp_name(child) {
             return Err(VaultError::UnsafeChild);
         }
-        remove_owned_regular_child(stage, &child)?;
+        opened.push((child.clone(), open_regular_file(stage, child)?));
+    }
+    for (child, file) in opened {
+        remove_child_matching_open_file(stage, &child, &file)?;
     }
     Ok(())
 }
@@ -675,34 +690,6 @@ fn restore_reaper(root: &OwnedFd, reap_name: &str, name: &str) -> Result<bool, V
         Err(VaultError::AttachmentConflict) => Ok(false),
         Err(error) => Err(error),
     }
-}
-
-pub(super) fn hash_regular_file(root: &OwnedFd, name: &str) -> Result<String, VaultError> {
-    validate_basename(name)?;
-    let initial = statat(root, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| VaultError::Io)?;
-    if FileType::from_raw_mode(initial.st_mode) != FileType::RegularFile {
-        return Err(VaultError::UnsafeChild);
-    }
-    let fd = openat(root, name, regular_read_flags(), Mode::empty())
-        .map_err(|_| VaultError::UnsafeChild)?;
-    if !is_type(&fd, FileType::RegularFile)? {
-        return Err(VaultError::UnsafeChild);
-    }
-    let mut file = File::from(fd);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|_| VaultError::Io)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
 }
 
 pub(super) fn write_probe(root: &OwnedFd) -> Result<(), VaultError> {

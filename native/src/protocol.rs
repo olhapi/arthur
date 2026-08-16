@@ -166,30 +166,7 @@ fn js_safe_integer(value: u64) -> bool {
 fn optional_js_safe_integer(value: Option<u64>) -> bool {
     value.is_none_or(js_safe_integer)
 }
-fn uuid(value: &str) -> bool {
-    let value = value.as_bytes();
-    if value.len() != 36
-        || !value
-            .iter()
-            .copied()
-            .enumerate()
-            .all(|(index, byte)| match index {
-                8 | 13 | 18 | 23 => byte == b'-',
-                _ => byte.is_ascii_hexdigit(),
-            })
-    {
-        return false;
-    }
-    let lower = String::from_utf8_lossy(value).to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "00000000-0000-0000-0000-000000000000" | "ffffffff-ffff-ffff-ffff-ffffffffffff"
-    ) {
-        return true;
-    }
-    matches!(value[14].to_ascii_lowercase(), b'1'..=b'8')
-        && matches!(value[19].to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b')
-}
+use crate::validation::zod_uuid as uuid;
 fn absolute(value: &mut String) -> bool {
     *value = trim_js(value);
     value.starts_with('/') && !value.contains('\0') && js_length(value) <= 4096

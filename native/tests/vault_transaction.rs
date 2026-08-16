@@ -608,6 +608,24 @@ fn startup_reclaims_only_marker_verified_stages_and_preserves_unverified_content
 }
 
 #[test]
+fn uppercase_max_uuid_stage_is_not_classified_as_arthur_owned() {
+    let destination = temp();
+    let unrelated = destination.join(".arthur-stage-FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF");
+    fs::create_dir(&unrelated).unwrap();
+    fs::write(
+        unrelated.join(".arthur-stage-owner-v1"),
+        ownership_marker("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"),
+    )
+    .unwrap();
+    fs::write(unrelated.join("unrelated"), b"preserve").unwrap();
+
+    drop(Vault::open(&destination).unwrap());
+
+    assert_eq!(fs::read(unrelated.join("unrelated")).unwrap(), b"preserve");
+    fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
 fn stage_cleanup_never_removes_a_replacement_directory_after_the_note_is_visible() {
     let destination = temp();
     let visible_stage = destination.join(format!(".arthur-stage-{SESSION}"));

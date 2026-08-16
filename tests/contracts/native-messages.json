@@ -12,6 +12,7 @@
   "invalidClientMessages": [
     { "type": "hello", "requestId": "r1", "protocolVersion": 1, "extra": true },
     { "type": "begin_save", "requestId": "r3", "sessionId": "not-a-uuid", "destination": "/tmp/Arthur", "source": "file:///tmp/a", "title": "Article", "markdown": "Body" },
+    { "type": "commit_save", "requestId": "r3-max", "sessionId": "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF" },
     { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "sequence": -1, "data": "AA==" },
     { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "sequence": 0, "data": "***" },
     { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "sequence": 9007199254740992, "data": "AA==" },
