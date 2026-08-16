@@ -26,7 +26,9 @@
     "build": "pnpm build:native && pnpm build:chrome && pnpm build:edge && pnpm build:firefox",
     "zip": "wxt zip -b chrome && wxt zip -b edge && wxt zip -b firefox",
     "verify:native": "pnpm test:native && pnpm format:native:check && pnpm lint:native && pnpm build:native && pnpm audit:native",
-    "verify": "pnpm test && pnpm typecheck && pnpm verify:native && pnpm build && pnpm audit --audit-level high"
+    "smoke": "node scripts/smoke/check-builds.mjs",
+    "acceptance:native": "node scripts/smoke/native-roundtrip.mjs --binary native/target/release/arthur-native-host",
+    "verify": "pnpm test && pnpm typecheck && pnpm test:native && pnpm format:native:check && pnpm lint:native && pnpm build && pnpm smoke && pnpm acceptance:native && pnpm audit --audit-level high && pnpm audit:native"
   },
   "dependencies": {
     "@mozilla/readability": "0.6.0",
