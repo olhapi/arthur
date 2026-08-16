@@ -2,26 +2,26 @@
   "validClientMessages": [
     { "type": "hello", "requestId": "r1", "protocolVersion": 1 },
     { "type": "test_destination", "requestId": "r2", "destination": "/tmp/Arthur" },
-    { "type": "begin_save", "requestId": "r3", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "destination": "/tmp/Arthur", "source": "https://example.test/a", "title": "Article", "markdown": "arthur-media://m1" },
-    { "type": "begin_media", "requestId": "r4", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "m1", "source": "https://example.test/hero.webp", "kind": "image", "contentType": "image/webp", "byteLength": 4 },
-    { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "m1", "sequence": 9007199254740991, "data": "AAEC/w==" },
-    { "type": "end_media", "requestId": "r5", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "m1", "chunks": 9007199254740991 },
+    { "type": "begin_save", "requestId": "r3", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "destination": "/tmp/Arthur", "source": "https://example.test/a", "title": "Article", "markdown": "arthur-media://7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832" },
+    { "type": "begin_media", "requestId": "r4", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "source": "https://example.test/hero.webp", "kind": "image", "contentType": "image/webp", "byteLength": 4 },
+    { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "sequence": 9007199254740991, "data": "AAEC/w==" },
+    { "type": "end_media", "requestId": "r5", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "chunks": 9007199254740991 },
     { "type": "commit_save", "requestId": "r6", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987" },
     { "type": "abort_save", "requestId": "r7", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "reason": "browser stream failed" }
   ],
   "invalidClientMessages": [
     { "type": "hello", "requestId": "r1", "protocolVersion": 1, "extra": true },
     { "type": "begin_save", "requestId": "r3", "sessionId": "not-a-uuid", "destination": "/tmp/Arthur", "source": "file:///tmp/a", "title": "Article", "markdown": "Body" },
-    { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "m1", "sequence": -1, "data": "AA==" },
-    { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "m1", "sequence": 0, "data": "***" },
-    { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "m1", "sequence": 9007199254740992, "data": "AA==" },
-    { "type": "end_media", "requestId": "r5", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "m1", "chunks": 9007199254740992 }
+    { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "sequence": -1, "data": "AA==" },
+    { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "sequence": 0, "data": "***" },
+    { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "sequence": 9007199254740992, "data": "AA==" },
+    { "type": "end_media", "requestId": "r5", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "chunks": 9007199254740992 }
   ],
   "validHostMessages": [
     { "type": "hello_result", "requestId": "r1", "protocolVersion": 1, "hostName": "com.olhapi.arthur", "hostVersion": "0.1.0" },
     { "type": "test_destination_result", "requestId": "r2", "destination": "/tmp/Arthur", "writable": true },
     { "type": "save_result", "requestId": "r6", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "savedPath": "/tmp/Arthur/Article.md" },
-    { "type": "ack", "requestId": "chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "m1", "sequence": 9007199254740991 },
+    { "type": "ack", "requestId": "chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "sequence": 9007199254740991 },
     { "type": "warning", "requestId": "r5", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "code": "media_fallback", "message": "Media remains remote" },
     { "type": "error", "code": "invalid_native_frame", "message": "Native message stream is invalid" }
   ],

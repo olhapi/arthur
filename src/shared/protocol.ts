@@ -5,11 +5,11 @@ import { AbsoluteDestinationSchema } from "./settings.js";
 
 const RequestIdSchema = z.string().trim().min(1).max(128);
 const SessionIdSchema = z.uuid();
-const MediaIdSchema = z.string().trim().min(1).max(128);
+const MediaIdSchema = z.uuid();
 const MessageCodeSchema = z.string().trim().min(1).max(128);
 const MessageTextSchema = z.string().trim().min(1).max(4_096);
 const TitleSchema = z.string().trim().min(1).max(512);
-const MarkdownSchema = z.string().max(20 * 1024 * 1024);
+const MarkdownSchema = z.string().max(10 * 1024 * 1024);
 const PathSchema = AbsoluteDestinationSchema;
 const MediaKindSchema = z.enum(["image", "audio", "video"]);
 const ContentTypeSchema = z

@@ -4,6 +4,8 @@ use arthur_native_host::{
 };
 use serde_json::Value;
 
+const MEDIA_ID: &str = "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832";
+
 #[test]
 fn shared_contract_fixtures_match_rust_validation() {
     let fixtures: Value =
@@ -28,8 +30,8 @@ fn rejects_non_zod_optional_null_and_invalid_boundaries() {
         parse_host(serde_json::json!({"type":"error","code":"x","message":"x","requestId":null}))
             .is_err()
     );
-    assert!(parse_client(serde_json::json!({"type":"media_chunk","sessionId":"a5a74c85-92de-4a5d-9768-4e66c4d64987","mediaId":"m","sequence":0,"data":""})).is_err());
-    assert!(parse_client(serde_json::json!({"type":"begin_media","requestId":"r","sessionId":"a5a74c85-92de-4a5d-9768-4e66c4d64987","mediaId":"m","source":"https://example.test/a","kind":"image","contentType":"image/webp/x","byteLength":0})).is_err());
+    assert!(parse_client(serde_json::json!({"type":"media_chunk","sessionId":"a5a74c85-92de-4a5d-9768-4e66c4d64987","mediaId":MEDIA_ID,"sequence":0,"data":""})).is_err());
+    assert!(parse_client(serde_json::json!({"type":"begin_media","requestId":"r","sessionId":"a5a74c85-92de-4a5d-9768-4e66c4d64987","mediaId":MEDIA_ID,"source":"https://example.test/a","kind":"image","contentType":"image/webp/x","byteLength":0})).is_err());
     assert!(parse_client(serde_json::json!({"type":"commit_save","requestId":"r","sessionId":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"})).is_err());
 }
 
@@ -64,7 +66,7 @@ fn mirrors_zod_transforms_and_uuid_rules_without_serializing_absent_options() {
         "type": "begin_media",
         "requestId": " request ",
         "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987",
-        "mediaId": " media ",
+        "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832",
         "source": " https://example.test/hero.webp ",
         "kind": "image",
         "contentType": " image/webp ",
@@ -82,7 +84,7 @@ fn mirrors_zod_transforms_and_uuid_rules_without_serializing_absent_options() {
         panic!("expected begin_media");
     };
     assert_eq!(request_id, "request");
-    assert_eq!(media_id, "media");
+    assert_eq!(media_id, MEDIA_ID);
     assert_eq!(source, "https://example.test/hero.webp");
     assert_eq!(content_type, "image/webp");
 
@@ -134,7 +136,7 @@ fn mirrors_zod_transforms_and_uuid_rules_without_serializing_absent_options() {
         parse_client(serde_json::json!({
             "type": "media_chunk",
             "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987",
-            "mediaId": "m1",
+            "mediaId": MEDIA_ID,
             "sequence": 0,
             "data": "AB=="
         }))
@@ -177,6 +179,48 @@ fn measures_zod_string_limits_in_javascript_utf16_code_units() {
         "type": "test_destination", "requestId": "r", "destination": format!("/{}", "a".repeat(4096))
     }))
     .is_err());
+}
+
+#[test]
+fn requires_uuid_media_ids_and_limits_markdown_to_ten_mebibytes_of_utf16() {
+    assert!(
+        parse_client(serde_json::json!({
+            "type": "begin_media",
+            "requestId": "r",
+            "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987",
+            "mediaId": "m1",
+            "source": "https://example.test/a.webp",
+            "kind": "image",
+            "contentType": "image/webp",
+            "byteLength": 0
+        }))
+        .is_err()
+    );
+    assert!(
+        parse_host(serde_json::json!({
+            "type": "ack",
+            "requestId": "chunk",
+            "mediaId": "m1"
+        }))
+        .is_err()
+    );
+
+    let markdown = "😀".repeat(5 * 1024 * 1024);
+    assert_eq!(markdown.encode_utf16().count(), 10 * 1024 * 1024);
+    let at_limit = serde_json::json!({
+        "type": "begin_save",
+        "requestId": "r",
+        "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987",
+        "destination": "/tmp/Arthur",
+        "source": "https://example.test/a",
+        "title": "Article",
+        "markdown": markdown,
+    });
+    assert!(parse_client(at_limit.clone()).is_ok());
+    let mut over_limit = at_limit;
+    over_limit["markdown"] =
+        Value::String(format!("{}x", over_limit["markdown"].as_str().unwrap()));
+    assert!(parse_client(over_limit).is_err());
 }
 
 #[test]

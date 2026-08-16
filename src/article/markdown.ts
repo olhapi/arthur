@@ -1,6 +1,8 @@
 import TurndownService from "turndown";
 
-const MEDIA_PLACEHOLDER = /arthur-media:\/\/([A-Za-z0-9_-]+)/g;
+const UUID_TOKEN =
+  "(?:00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})";
+const MEDIA_PLACEHOLDER = new RegExp(`arthur-media://(${UUID_TOKEN})(?![A-Za-z0-9_-])`, "g");
 
 function tableCellText(cell: HTMLTableCellElement): string {
   return (cell.textContent ?? "").trim().replaceAll("|", "\\|").replace(/\s+/g, " ");

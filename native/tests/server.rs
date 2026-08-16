@@ -10,6 +10,8 @@ use std::{
 
 static COUNT: AtomicU64 = AtomicU64::new(0);
 const SESSION: &str = "a5a74c85-92de-4a5d-9768-4e66c4d64987";
+const MEDIA_ID: &str = "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832";
+const EMPTY_MEDIA_ID: &str = "e0ddc6e9-9075-455f-9af0-2d2fd08dcc6d";
 
 fn temp() -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -40,7 +42,7 @@ fn begin_media() -> ClientMessage {
     ClientMessage::BeginMedia {
         request_id: "media".to_owned(),
         session_id: SESSION.to_owned(),
-        media_id: "m1".to_owned(),
+        media_id: MEDIA_ID.to_owned(),
         source: "https://cdn.example.test/hero.webp".to_owned(),
         kind: MediaKind::Image,
         content_type: "image/webp".to_owned(),
@@ -61,18 +63,21 @@ fn handles_the_canonical_happy_path_with_a_tuple_chunk_ack() {
             request_id: "probe".to_owned(),
             destination: destination.to_string_lossy().into_owned(),
         }),
-        manager.handle(begin_save(&destination, "arthur-media://m1")),
+        manager.handle(begin_save(
+            &destination,
+            &format!("arthur-media://{MEDIA_ID}"),
+        )),
         manager.handle(begin_media()),
         manager.handle(ClientMessage::MediaChunk {
             session_id: SESSION.to_owned(),
-            media_id: "m1".to_owned(),
+            media_id: MEDIA_ID.to_owned(),
             sequence: 0,
             data: "dGVzdA==".to_owned(),
         }),
         manager.handle(ClientMessage::EndMedia {
             request_id: "end".to_owned(),
             session_id: SESSION.to_owned(),
-            media_id: "m1".to_owned(),
+            media_id: MEDIA_ID.to_owned(),
             chunks: 1,
         }),
         manager.handle(ClientMessage::CommitSave {
@@ -93,11 +98,11 @@ fn handles_the_canonical_happy_path_with_a_tuple_chunk_ack() {
     );
     assert_eq!(
         values[4],
-        serde_json::json!({"type":"ack","requestId":"chunk","sessionId":SESSION,"mediaId":"m1","sequence":0})
+        serde_json::json!({"type":"ack","requestId":"chunk","sessionId":SESSION,"mediaId":MEDIA_ID,"sequence":0})
     );
     assert_eq!(
         values[5],
-        serde_json::json!({"type":"ack","requestId":"end","sessionId":SESSION,"mediaId":"m1"})
+        serde_json::json!({"type":"ack","requestId":"end","sessionId":SESSION,"mediaId":MEDIA_ID})
     );
     assert_eq!(values[6]["type"], "save_result");
     assert_eq!(values[6]["requestId"], "commit");
@@ -155,11 +160,14 @@ fn reports_version_destination_and_session_transition_errors_with_stable_codes()
 fn reports_chunk_state_errors_and_keeps_a_recoverable_media_fallback_session_usable() {
     let destination = temp();
     let mut manager = SessionManager::new();
-    manager.handle(begin_save(&destination, "arthur-media://m1"));
+    manager.handle(begin_save(
+        &destination,
+        &format!("arthur-media://{MEDIA_ID}"),
+    ));
     manager.handle(begin_media());
     let wrong_sequence = json(manager.handle(ClientMessage::MediaChunk {
         session_id: SESSION.to_owned(),
-        media_id: "m1".to_owned(),
+        media_id: MEDIA_ID.to_owned(),
         sequence: 1,
         data: "dGVzdA==".to_owned(),
     }));
@@ -167,7 +175,7 @@ fn reports_chunk_state_errors_and_keeps_a_recoverable_media_fallback_session_usa
     assert_eq!(
         json(manager.handle(ClientMessage::MediaChunk {
             session_id: SESSION.to_owned(),
-            media_id: "m1".to_owned(),
+            media_id: MEDIA_ID.to_owned(),
             sequence: 0,
             data: "dGVzdA==".to_owned(),
         }))["type"],
@@ -176,7 +184,7 @@ fn reports_chunk_state_errors_and_keeps_a_recoverable_media_fallback_session_usa
     let fallback = json(manager.handle(ClientMessage::EndMedia {
         request_id: "end".to_owned(),
         session_id: SESSION.to_owned(),
-        media_id: "m1".to_owned(),
+        media_id: MEDIA_ID.to_owned(),
         chunks: 2,
     }));
     assert_eq!(fallback["type"], "warning");
@@ -195,12 +203,15 @@ fn reports_chunk_state_errors_and_keeps_a_recoverable_media_fallback_session_usa
 fn maps_zero_byte_length_to_an_unknown_length_and_allows_an_empty_attachment() {
     let destination = temp();
     let mut manager = SessionManager::new();
-    manager.handle(begin_save(&destination, "arthur-media://empty"));
+    manager.handle(begin_save(
+        &destination,
+        &format!("arthur-media://{EMPTY_MEDIA_ID}"),
+    ));
     assert_eq!(
         json(manager.handle(ClientMessage::BeginMedia {
             request_id: "media".to_owned(),
             session_id: SESSION.to_owned(),
-            media_id: "empty".to_owned(),
+            media_id: EMPTY_MEDIA_ID.to_owned(),
             source: "https://cdn.example.test/empty.webp".to_owned(),
             kind: MediaKind::Image,
             content_type: "image/webp".to_owned(),
@@ -212,7 +223,7 @@ fn maps_zero_byte_length_to_an_unknown_length_and_allows_an_empty_attachment() {
         json(manager.handle(ClientMessage::EndMedia {
             request_id: "end".to_owned(),
             session_id: SESSION.to_owned(),
-            media_id: "empty".to_owned(),
+            media_id: EMPTY_MEDIA_ID.to_owned(),
             chunks: 0,
         }))["type"],
         "ack"
@@ -260,13 +271,17 @@ fn abort_save_acknowledges_the_session_and_cleans_the_staged_transaction() {
 fn maps_fatal_commit_failures_and_redacts_untrusted_values_from_every_error() {
     let destination = temp();
     let mut manager = SessionManager::new();
-    manager.handle(begin_save(&destination, "arthur-media://missing"));
+    manager.handle(begin_save(
+        &destination,
+        &format!("arthur-media://{MEDIA_ID}"),
+    ));
+    manager.handle(begin_media());
     let failure = json(manager.handle(ClientMessage::CommitSave {
         request_id: "commit".to_owned(),
         session_id: SESSION.to_owned(),
     }));
     assert_eq!(failure["type"], "error");
-    assert_eq!(failure["code"], "commit_failed");
+    assert_eq!(failure["code"], "invalid_transition");
     let rendered = failure.to_string();
     for secret in ["arthur-media", "example.test", "/tmp"] {
         assert!(!rendered.contains(secret), "error leaked {secret}");

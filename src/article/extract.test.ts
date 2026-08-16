@@ -15,8 +15,20 @@ function fixtureDocument(): Document {
 }
 
 describe("extractArticle", () => {
-  it("extracts rendered article media into deterministic placeholders", () => {
-    const article = extractArticle(fixtureDocument(), "https://example.test/articles/media?edition=1#section");
+  it("extracts rendered article media into injected UUID placeholders", () => {
+    const ids = [
+      "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832",
+      "e0ddc6e9-9075-455f-9af0-2d2fd08dcc6d",
+      "b57a7301-352a-4d4d-bdc0-cb7a0a020ee1",
+      "4a08295e-a330-4cdd-9ca6-508eafef3bc4",
+      "0cd5a1b1-152a-4bf5-8ddd-72dc516e5a75",
+      "a430221c-6d1f-4a57-af26-7c3c70bb2d9a",
+      "1853f601-f0a0-4667-b949-8e0bc5f6d8d1",
+    ];
+    let next = 0;
+    const article = extractArticle(fixtureDocument(), "https://example.test/articles/media?edition=1#section", {
+      createMediaId: () => ids[next++] ?? "",
+    });
 
     expect(article.title).toBe("All Media Formats");
     expect(article.source).toBe("https://example.test/articles/media?edition=1");
@@ -35,6 +47,9 @@ describe("extractArticle", () => {
       ]),
     );
     expect(article.media.filter((item) => item.originalName === "photo.avif")).toHaveLength(1);
+    expect(article.media.map((item) => item.id)).toEqual(ids);
+    expect(article.media.every((item) => item.placeholder === `arthur-media://${item.id}`)).toBe(true);
+    expect(article.markdown).toContain(`arthur-media://${ids[0]}`);
     expect(article.markdown).toContain("[Embedded content](https://example.test/embedded/player)");
   });
 

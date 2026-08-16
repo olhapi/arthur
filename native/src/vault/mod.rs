@@ -22,6 +22,7 @@ pub enum VaultError {
     InvalidChunk,
     MediaLimitExceeded,
     AttachmentConflict,
+    SourceConflict,
     UnresolvedPlaceholder,
     Busy,
     Io,

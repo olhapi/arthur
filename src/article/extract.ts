@@ -20,6 +20,10 @@ export interface ExtractedArticle {
   media: ExtractedMedia[];
 }
 
+export interface ExtractArticleOptions {
+  createMediaId?: () => string;
+}
+
 const ALLOWED_TAGS = [
   "a",
   "article",
@@ -120,7 +124,7 @@ function applyRenderedSourceSnapshot(source: Document, clone: Document): void {
   }
 }
 
-function replaceMediaWithPlaceholders(document: Document): ExtractedMedia[] {
+function replaceMediaWithPlaceholders(document: Document, createMediaId: () => string): ExtractedMedia[] {
   const media: ExtractedMedia[] = [];
   const byUrl = new Map<string, ExtractedMedia>();
 
@@ -140,12 +144,13 @@ function replaceMediaWithPlaceholders(document: Document): ExtractedMedia[] {
       return existing;
     }
     const item: ExtractedMedia = {
-      id: `m${media.length + 1}`,
+      id: createMediaId(),
       url: normalized,
       originalName: originalName(normalized, classification),
       kind: classification,
-      placeholder: `arthur-media://m${media.length + 1}`,
+      placeholder: "",
     };
+    item.placeholder = `arthur-media://${item.id}`;
     media.push(item);
     byUrl.set(normalized, item);
     return item;
@@ -203,7 +208,11 @@ function replaceMediaWithPlaceholders(document: Document): ExtractedMedia[] {
   return media;
 }
 
-export function extractArticle(document: Document, finalUrl: string): ExtractedArticle {
+export function extractArticle(
+  document: Document,
+  finalUrl: string,
+  { createMediaId = () => crypto.randomUUID() }: ExtractArticleOptions = {},
+): ExtractedArticle {
   const source = normalizeSource(finalUrl);
   const renderedClone = document.cloneNode(true) as Document;
   applyRenderedSourceSnapshot(document, renderedClone);
@@ -230,7 +239,7 @@ export function extractArticle(document: Document, finalUrl: string): ExtractedA
     ALLOW_DATA_ATTR: false,
   });
   const outputDocument = articleContentDocument(renderedClone, sanitized);
-  const media = replaceMediaWithPlaceholders(outputDocument);
+  const media = replaceMediaWithPlaceholders(outputDocument, createMediaId);
 
   return {
     title,

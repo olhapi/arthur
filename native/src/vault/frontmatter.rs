@@ -2,9 +2,16 @@ use super::{
     VaultError, fs,
     names::{normalize_source, validate_basename},
 };
+use std::fs::File;
 use std::os::fd::OwnedFd;
 
 const MAX_FRONTMATTER_BYTES: usize = 64 * 1024;
+
+pub(super) struct ExistingArticle {
+    pub name: String,
+    pub fingerprint: fs::FileFingerprint,
+    pub verified_file: File,
+}
 
 fn take_line(value: &str) -> Option<(&str, &str)> {
     let (line, rest) = value.split_once('\n')?;
@@ -39,17 +46,16 @@ fn source_from_arthur_frontmatter(value: &str) -> Option<String> {
 pub(super) fn find_existing_article(
     destination: &OwnedFd,
     incoming_source: &str,
-) -> Result<Option<String>, VaultError> {
+) -> Result<Option<ExistingArticle>, VaultError> {
     let incoming_source = normalize_source(incoming_source)?;
     for name in fs::direct_children(destination)? {
         if !name.ends_with(".md") {
             continue;
         }
-        let Some(bytes) = (match fs::read_regular_prefix(destination, &name, MAX_FRONTMATTER_BYTES)
-        {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        }) else {
+        let Ok(mut file) = fs::open_regular_file(destination, &name) else {
+            continue;
+        };
+        let Ok(bytes) = fs::read_open_file_prefix(&mut file, MAX_FRONTMATTER_BYTES) else {
             continue;
         };
         let Ok(contents) = std::str::from_utf8(&bytes) else {
@@ -59,7 +65,14 @@ pub(super) fn find_existing_article(
             continue;
         };
         if normalize_source(&stored_source).is_ok_and(|source| source == incoming_source) {
-            return Ok(Some(name));
+            let Ok(fingerprint) = fs::fingerprint_open_regular_file(&mut file) else {
+                continue;
+            };
+            return Ok(Some(ExistingArticle {
+                name,
+                fingerprint,
+                verified_file: file,
+            }));
         }
     }
     Ok(None)
@@ -67,18 +80,26 @@ pub(super) fn find_existing_article(
 
 pub(super) fn verifies_existing_article_source(
     destination: &OwnedFd,
-    name: &str,
+    existing: &mut ExistingArticle,
     incoming_source: &str,
 ) -> Result<bool, VaultError> {
-    validate_basename(name)?;
-    if !name.ends_with(".md") {
+    validate_basename(&existing.name)?;
+    if !existing.name.ends_with(".md") {
         return Ok(false);
     }
     let incoming_source = normalize_source(incoming_source)?;
-    let bytes = fs::read_regular_prefix(destination, name, MAX_FRONTMATTER_BYTES)?;
-    let Some(bytes) = bytes else {
+    if fs::fingerprint_open_regular_file(&mut existing.verified_file)? != existing.fingerprint {
         return Ok(false);
+    }
+    let mut file = match fs::open_regular_file(destination, &existing.name) {
+        Ok(file) => file,
+        Err(VaultError::UnsafeChild | VaultError::Io) => return Ok(false),
+        Err(error) => return Err(error),
     };
+    if fs::fingerprint_open_regular_file(&mut file)? != existing.fingerprint {
+        return Ok(false);
+    }
+    let bytes = fs::read_open_file_prefix(&mut file, MAX_FRONTMATTER_BYTES)?;
     let Ok(contents) = std::str::from_utf8(&bytes) else {
         return Ok(false);
     };
@@ -153,7 +174,9 @@ mod tests {
         let vault = Vault::open(&destination).unwrap();
 
         assert_eq!(
-            find_existing_article(&vault.destination, "https://example.com/a").unwrap(),
+            find_existing_article(&vault.destination, "https://example.com/a")
+                .unwrap()
+                .map(|article| article.name),
             Some("article.md".to_owned())
         );
 
@@ -174,7 +197,9 @@ mod tests {
         let vault = Vault::open(&destination).unwrap();
 
         assert_eq!(
-            find_existing_article(&vault.destination, source).unwrap(),
+            find_existing_article(&vault.destination, source)
+                .unwrap()
+                .map(|article| article.name),
             Some("long-body.md".to_owned())
         );
 
@@ -198,7 +223,9 @@ mod tests {
         let vault = Vault::open(&destination).unwrap();
 
         assert_eq!(
-            find_existing_article(&vault.destination, &normalized).unwrap(),
+            find_existing_article(&vault.destination, &normalized)
+                .unwrap()
+                .map(|article| article.name),
             Some("long-source.md".to_owned())
         );
 
@@ -277,7 +304,9 @@ mod tests {
         let vault = Vault::open(&destination).unwrap();
 
         assert_eq!(
-            find_existing_article(&vault.destination, source).unwrap(),
+            find_existing_article(&vault.destination, source)
+                .unwrap()
+                .map(|article| article.name),
             None
         );
 

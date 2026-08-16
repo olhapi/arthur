@@ -9,6 +9,33 @@ use std::{
 
 static COUNT: AtomicU64 = AtomicU64::new(0);
 const SESSION: &str = "a5a74c85-92de-4a5d-9768-4e66c4d64987";
+const STALE_SESSION: &str = "b5a74c85-92de-4a5d-9768-4e66c4d64987";
+const REAPER_SESSION: &str = "c5a74c85-92de-4a5d-9768-4e66c4d64987";
+
+fn ownership_marker(session: &str) -> String {
+    format!("arthur-stage-owner-v1\n{session}\n")
+}
+
+fn media_id(label: &str) -> &'static str {
+    match label {
+        "gif" => "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832",
+        "webp" => "e0ddc6e9-9075-455f-9af0-2d2fd08dcc6d",
+        "svg" => "b57a7301-352a-4d4d-bdc0-cb7a0a020ee1",
+        "avif" => "4a08295e-a330-4cdd-9ca6-508eafef3bc4",
+        "mp3" => "0cd5a1b1-152a-4bf5-8ddd-72dc516e5a75",
+        "mp4" => "a430221c-6d1f-4a57-af26-7c3c70bb2d9a",
+        "one" => "1853f601-f0a0-4667-b949-8e0bc5f6d8d1",
+        "two" => "0d1fc36f-829d-44bb-8fba-82e260881efd",
+        "known" => "92d8728c-4ee0-4225-ad10-38a0d1036c8d",
+        "unknown" => "117446a1-6bf1-4ae2-b88f-00c45cee92a7",
+        "empty" => "729d093a-fc78-4b17-a739-f0c0d0803b71",
+        "video" => "9107bfe8-607f-42d8-96a9-e19e8ac671e7",
+        "too-big-image" => "dcc905c1-fc85-48a6-930b-44e2ef9ee830",
+        "audio-one" => "6d8f3f92-a5af-474f-9772-4eb10d7c96e2",
+        "audio-two" => "2f710c95-8f0b-4c52-9ea0-0528c247d8e4",
+        _ => panic!("unknown test media label: {label}"),
+    }
+}
 
 fn temp() -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -37,7 +64,7 @@ fn media_spec(
     declared_bytes: Option<u64>,
 ) -> MediaSpec {
     MediaSpec {
-        media_id: id.to_owned(),
+        media_id: media_id(id).to_owned(),
         source: source.to_owned(),
         kind,
         content_type: content_type.to_owned(),
@@ -67,7 +94,15 @@ fn streams_each_supported_format_without_changing_its_bytes() {
         .begin(save_spec(
             source,
             "Formats",
-            "arthur-media://gif arthur-media://webp arthur-media://svg arthur-media://avif arthur-media://mp3 arthur-media://mp4",
+            &format!(
+                "arthur-media://{} arthur-media://{} arthur-media://{} arthur-media://{} arthur-media://{} arthur-media://{}",
+                media_id("gif"),
+                media_id("webp"),
+                media_id("svg"),
+                media_id("avif"),
+                media_id("mp3"),
+                media_id("mp4"),
+            ),
         ))
         .unwrap();
     let formats = [
@@ -125,9 +160,9 @@ fn streams_each_supported_format_without_changing_its_bytes() {
                 Some(bytes.len() as u64),
             ))
             .unwrap();
-        transaction.append_chunk(id, 0, bytes).unwrap();
+        transaction.append_chunk(media_id(id), 0, bytes).unwrap();
         assert_eq!(
-            transaction.finish_media(id, 1).unwrap(),
+            transaction.finish_media(media_id(id), 1).unwrap(),
             MediaDisposition::Saved
         );
     }
@@ -154,7 +189,11 @@ fn names_content_from_the_url_and_reuses_equal_bytes_once() {
         .begin(save_spec(
             "https://example.test/article",
             "Article",
-            "arthur-media://one arthur-media://two",
+            &format!(
+                "arthur-media://{} arthur-media://{}",
+                media_id("one"),
+                media_id("two")
+            ),
         ))
         .unwrap();
     for id in ["one", "two"] {
@@ -167,8 +206,8 @@ fn names_content_from_the_url_and_reuses_equal_bytes_once() {
                 Some(bytes.len() as u64),
             ))
             .unwrap();
-        transaction.append_chunk(id, 0, bytes).unwrap();
-        transaction.finish_media(id, 1).unwrap();
+        transaction.append_chunk(media_id(id), 0, bytes).unwrap();
+        transaction.finish_media(media_id(id), 1).unwrap();
     }
     let saved = transaction.commit().unwrap();
     let attachments = attachment_bytes(&destination);
@@ -197,7 +236,7 @@ fn rejects_an_existing_same_name_with_different_full_digest_before_a_note_is_vis
         .begin(save_spec(
             "https://example.test/article",
             "Article",
-            "arthur-media://one",
+            &format!("arthur-media://{}", media_id("one")),
         ))
         .unwrap();
     transaction
@@ -209,8 +248,10 @@ fn rejects_an_existing_same_name_with_different_full_digest_before_a_note_is_vis
             Some(4),
         ))
         .unwrap();
-    transaction.append_chunk("one", 0, b"test").unwrap();
-    transaction.finish_media("one", 1).unwrap();
+    transaction
+        .append_chunk(media_id("one"), 0, b"test")
+        .unwrap();
+    transaction.finish_media(media_id("one"), 1).unwrap();
     assert_eq!(transaction.commit(), Err(VaultError::AttachmentConflict));
     assert!(!destination.join("Article.md").exists());
     assert_eq!(
@@ -228,7 +269,12 @@ fn handles_known_unknown_and_empty_declared_lengths() {
         .begin(save_spec(
             "https://example.test/article",
             "Lengths",
-            "arthur-media://known arthur-media://unknown arthur-media://empty",
+            &format!(
+                "arthur-media://{} arthur-media://{} arthur-media://{}",
+                media_id("known"),
+                media_id("unknown"),
+                media_id("empty"),
+            ),
         ))
         .unwrap();
     for (id, declared, bytes) in [
@@ -246,10 +292,10 @@ fn handles_known_unknown_and_empty_declared_lengths() {
             ))
             .unwrap();
         if !bytes.is_empty() {
-            transaction.append_chunk(id, 0, bytes).unwrap();
-            transaction.finish_media(id, 1).unwrap();
+            transaction.append_chunk(media_id(id), 0, bytes).unwrap();
+            transaction.finish_media(media_id(id), 1).unwrap();
         } else {
-            transaction.finish_media(id, 0).unwrap();
+            transaction.finish_media(media_id(id), 0).unwrap();
         }
     }
     transaction.commit().unwrap();
@@ -266,7 +312,7 @@ fn records_transfer_failures_as_remote_fallbacks_without_aborting_the_article() 
         .begin(save_spec(
             "https://example.test/article",
             "Fallback",
-            "before arthur-media://video after",
+            &format!("before arthur-media://{} after", media_id("video")),
         ))
         .unwrap();
     transaction
@@ -278,9 +324,11 @@ fn records_transfer_failures_as_remote_fallbacks_without_aborting_the_article() 
             None,
         ))
         .unwrap();
-    transaction.append_chunk("video", 0, b"partial").unwrap();
+    transaction
+        .append_chunk(media_id("video"), 0, b"partial")
+        .unwrap();
     assert_eq!(
-        transaction.finish_media("video", 2).unwrap(),
+        transaction.finish_media(media_id("video"), 2).unwrap(),
         MediaDisposition::Fallback {
             code: "media_fallback",
             message: "Media transfer was incomplete; original link was retained.",
@@ -303,7 +351,7 @@ fn rejects_invalid_transitions_and_limits_before_any_note_rename() {
         .begin(save_spec(
             "https://example.test/article",
             "State",
-            "arthur-media://one",
+            &format!("arthur-media://{}", media_id("one")),
         ))
         .unwrap();
     assert_eq!(
@@ -320,7 +368,7 @@ fn rejects_invalid_transitions_and_limits_before_any_note_rename() {
         ))
         .unwrap();
     assert_eq!(
-        transaction.append_chunk("one", 1, b"x"),
+        transaction.append_chunk(media_id("one"), 1, b"x"),
         Err(VaultError::InvalidChunk)
     );
     assert_eq!(transaction.commit(), Err(VaultError::InvalidTransition));
@@ -336,7 +384,7 @@ fn validates_completed_lengths_closed_media_and_declared_resource_budgets() {
         .begin(save_spec(
             "https://example.test/article",
             "Budgets",
-            "arthur-media://one",
+            &format!("arthur-media://{}", media_id("one")),
         ))
         .unwrap();
     transaction
@@ -348,17 +396,19 @@ fn validates_completed_lengths_closed_media_and_declared_resource_budgets() {
             Some(2),
         ))
         .unwrap();
-    transaction.append_chunk("one", 0, b"three").unwrap();
+    transaction
+        .append_chunk(media_id("one"), 0, b"three")
+        .unwrap();
     assert!(matches!(
-        transaction.finish_media("one", 1),
+        transaction.finish_media(media_id("one"), 1),
         Ok(MediaDisposition::Fallback { .. })
     ));
     assert_eq!(
-        transaction.finish_media("one", 1),
+        transaction.finish_media(media_id("one"), 1),
         Err(VaultError::InvalidChunk)
     );
     assert_eq!(
-        transaction.append_chunk("one", 1, b"x"),
+        transaction.append_chunk(media_id("one"), 1, b"x"),
         Err(VaultError::InvalidChunk)
     );
     assert_eq!(
@@ -402,7 +452,7 @@ fn abort_removes_all_staged_files_and_the_hidden_stage_directory() {
         .begin(save_spec(
             "https://example.test/article",
             "Abort",
-            "arthur-media://one",
+            &format!("arthur-media://{}", media_id("one")),
         ))
         .unwrap();
     transaction
@@ -414,7 +464,9 @@ fn abort_removes_all_staged_files_and_the_hidden_stage_directory() {
             None,
         ))
         .unwrap();
-    transaction.append_chunk("one", 0, b"staged").unwrap();
+    transaction
+        .append_chunk(media_id("one"), 0, b"staged")
+        .unwrap();
     transaction.abort().unwrap();
     assert!(fs::read_dir(&destination).unwrap().all(|entry| {
         !entry
@@ -423,6 +475,29 @@ fn abort_removes_all_staged_files_and_the_hidden_stage_directory() {
             .to_string_lossy()
             .starts_with(".arthur-stage-")
     }));
+    fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
+fn begins_with_a_synced_ownership_marker_before_any_staged_content() {
+    let destination = temp();
+    let stage = destination.join(format!(".arthur-stage-{SESSION}"));
+    let transaction = Vault::open(&destination)
+        .unwrap()
+        .begin(save_spec("https://example.test/article", "Marker", "body"))
+        .unwrap();
+
+    let entries: Vec<_> = fs::read_dir(&stage)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(entries, vec![".arthur-stage-owner-v1"]);
+    assert_eq!(
+        fs::read_to_string(stage.join(".arthur-stage-owner-v1")).unwrap(),
+        ownership_marker(SESSION)
+    );
+
+    transaction.abort().unwrap();
     fs::remove_dir_all(destination).unwrap();
 }
 
@@ -447,32 +522,85 @@ fn destination_lock_prevents_live_stage_reclamation_and_releases_after_drop() {
     let unlocked = Vault::open(&destination).unwrap();
     drop(unlocked);
 
-    let stale = destination.join(".arthur-stage-a5a74c85-92de-4a5d-9768-4e66c4d64988");
-    fs::create_dir(&stale).unwrap();
-    fs::write(stale.join("media-0"), b"stale").unwrap();
+    let unverified = destination.join(".arthur-stage-d5a74c85-92de-4a5d-9768-4e66c4d64988");
+    fs::create_dir(&unverified).unwrap();
+    fs::write(unverified.join("unrelated"), b"preserve").unwrap();
+    let verified = destination.join(format!(".arthur-stage-{STALE_SESSION}"));
+    fs::create_dir(&verified).unwrap();
+    fs::write(
+        verified.join(".arthur-stage-owner-v1"),
+        ownership_marker(STALE_SESSION),
+    )
+    .unwrap();
+    fs::write(verified.join("media-0"), b"stale").unwrap();
     let reopened = Vault::open(&destination).unwrap();
-    assert!(!stale.exists());
+    assert!(unverified.is_dir());
+    assert_eq!(fs::read(unverified.join("unrelated")).unwrap(), b"preserve");
+    assert!(!verified.exists());
     drop(reopened);
     fs::remove_dir_all(destination).unwrap();
 }
 
 #[test]
-fn startup_reclaims_interrupted_reapers_and_stale_non_directory_stage_entries() {
+fn startup_reclaims_only_marker_verified_stages_and_preserves_unverified_content() {
     let destination = temp();
     let outside = temp();
     let interrupted_reaper = destination.join(".arthur-reap-0123456789abcdef0123456789abcdef");
     let stale_file = destination.join(".arthur-stage-a5a74c85-92de-4a5d-9768-4e66c4d64989");
     let stale_link = destination.join(".arthur-stage-a5a74c85-92de-4a5d-9768-4e66c4d6498a");
+    let invalid_marker = destination.join(".arthur-stage-a5a74c85-92de-4a5d-9768-4e66c4d6498b");
+    let marker_symlink = destination.join(".arthur-stage-a5a74c85-92de-4a5d-9768-4e66c4d6498c");
+    let verified_stage = destination.join(format!(".arthur-stage-{STALE_SESSION}"));
+    let verified_reaper = destination.join(".arthur-reap-abcdef0123456789abcdef0123456789");
     fs::create_dir(&interrupted_reaper).unwrap();
-    fs::write(interrupted_reaper.join("media-0"), b"stale").unwrap();
-    fs::write(&stale_file, b"stale").unwrap();
+    fs::write(interrupted_reaper.join("unrelated"), b"preserve").unwrap();
+    fs::write(&stale_file, b"preserve").unwrap();
     std::os::unix::fs::symlink(&outside, &stale_link).unwrap();
+    fs::create_dir(&invalid_marker).unwrap();
+    fs::write(invalid_marker.join(".arthur-stage-owner-v1"), b"not Arthur").unwrap();
+    fs::write(invalid_marker.join("unrelated"), b"preserve").unwrap();
+    fs::write(outside.join("marker"), b"outside marker").unwrap();
+    fs::create_dir(&marker_symlink).unwrap();
+    std::os::unix::fs::symlink(
+        outside.join("marker"),
+        marker_symlink.join(".arthur-stage-owner-v1"),
+    )
+    .unwrap();
+    fs::write(marker_symlink.join("unrelated"), b"preserve").unwrap();
+    fs::create_dir(&verified_stage).unwrap();
+    fs::write(
+        verified_stage.join(".arthur-stage-owner-v1"),
+        ownership_marker(STALE_SESSION),
+    )
+    .unwrap();
+    fs::write(verified_stage.join("media-0"), b"stale").unwrap();
+    fs::create_dir(&verified_reaper).unwrap();
+    fs::write(
+        verified_reaper.join(".arthur-stage-owner-v1"),
+        ownership_marker(REAPER_SESSION),
+    )
+    .unwrap();
+    fs::write(verified_reaper.join("note-0"), b"stale").unwrap();
 
     let reopened = Vault::open(&destination).unwrap();
-    assert!(!interrupted_reaper.exists());
-    assert!(!stale_file.exists());
-    assert!(!stale_link.exists());
-    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    assert_eq!(
+        fs::read(interrupted_reaper.join("unrelated")).unwrap(),
+        b"preserve"
+    );
+    assert_eq!(fs::read(&stale_file).unwrap(), b"preserve");
+    assert!(stale_link.is_symlink());
+    assert_eq!(
+        fs::read(invalid_marker.join("unrelated")).unwrap(),
+        b"preserve"
+    );
+    assert_eq!(
+        fs::read(marker_symlink.join("unrelated")).unwrap(),
+        b"preserve"
+    );
+    assert_eq!(fs::read(outside.join("marker")).unwrap(), b"outside marker");
+    assert!(!verified_stage.exists());
+    assert!(!verified_reaper.exists());
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
     drop(reopened);
 
     fs::remove_dir_all(destination).unwrap();
@@ -506,7 +634,11 @@ fn stage_cleanup_never_removes_a_replacement_directory_after_the_note_is_visible
         displaced_stage.is_dir(),
         "the descriptor-owned stage may have been moved, but it must be emptied safely"
     );
-    assert_eq!(fs::read_dir(&displaced_stage).unwrap().count(), 0);
+    assert_eq!(
+        fs::read_to_string(displaced_stage.join(".arthur-stage-owner-v1")).unwrap(),
+        ownership_marker(SESSION)
+    );
+    assert_eq!(fs::read_dir(&displaced_stage).unwrap().count(), 1);
 
     fs::remove_dir_all(destination).unwrap();
 }
@@ -531,7 +663,11 @@ fn abort_never_removes_a_replacement_directory_at_the_stage_path() {
     transaction.abort().unwrap();
     assert!(visible_stage.is_dir());
     assert!(displaced_stage.is_dir());
-    assert_eq!(fs::read_dir(&displaced_stage).unwrap().count(), 0);
+    assert_eq!(
+        fs::read_to_string(displaced_stage.join(".arthur-stage-owner-v1")).unwrap(),
+        ownership_marker(SESSION)
+    );
+    assert_eq!(fs::read_dir(&displaced_stage).unwrap().count(), 1);
 
     fs::remove_dir_all(destination).unwrap();
 }
@@ -547,7 +683,7 @@ fn held_attachments_descriptor_cannot_be_redirected_by_a_visible_symlink_swap() 
         .begin(save_spec(
             "https://example.test/article",
             "Anchored",
-            "arthur-media://one",
+            &format!("arthur-media://{}", media_id("one")),
         ))
         .unwrap();
     fs::rename(&original, &held).unwrap();
@@ -561,8 +697,10 @@ fn held_attachments_descriptor_cannot_be_redirected_by_a_visible_symlink_swap() 
             Some(4),
         ))
         .unwrap();
-    transaction.append_chunk("one", 0, b"test").unwrap();
-    transaction.finish_media("one", 1).unwrap();
+    transaction
+        .append_chunk(media_id("one"), 0, b"test")
+        .unwrap();
+    transaction.finish_media(media_id("one"), 1).unwrap();
     assert_eq!(transaction.commit(), Err(VaultError::UnsafeChild));
     assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
     assert!(!destination.join("Anchored.md").exists());

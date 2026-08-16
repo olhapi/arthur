@@ -334,6 +334,10 @@ fn vault_error(
             "attachment_conflict",
             "An existing attachment has different content.",
         ),
+        VaultError::SourceConflict => (
+            "commit_failed",
+            "The article changed while it was being saved.",
+        ),
         VaultError::UnresolvedPlaceholder | VaultError::Io => match context {
             ErrorContext::Chunk => ("invalid_chunk", "The media chunk is invalid."),
             ErrorContext::Destination | ErrorContext::Begin => (

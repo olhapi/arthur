@@ -1,4 +1,4 @@
-use arthur_native_host::framing::{FrameDecoder, FrameError, MAX_NATIVE_MESSAGE_BYTES};
+use arthur_native_host::framing::{FrameDecoder, FrameError, MAX_NATIVE_REQUEST_BYTES};
 
 fn frame(payload: &[u8]) -> Vec<u8> {
     let mut result = (payload.len() as u32).to_le_bytes().to_vec();
@@ -49,8 +49,8 @@ fn every_bad_frame_permanently_poisons_the_decoder() {
     for (bytes, expected) in [
         (vec![0, 0, 0, 0], FrameError::ZeroLength),
         (
-            (MAX_NATIVE_MESSAGE_BYTES as u32 + 1).to_le_bytes().to_vec(),
-            FrameError::Oversized(MAX_NATIVE_MESSAGE_BYTES as u32 + 1),
+            (MAX_NATIVE_REQUEST_BYTES as u32 + 1).to_le_bytes().to_vec(),
+            FrameError::Oversized(MAX_NATIVE_REQUEST_BYTES as u32 + 1),
         ),
         (frame(&[0xc3, 0x28]), FrameError::InvalidUtf8),
         (frame(b"no"), FrameError::InvalidJson),
@@ -60,4 +60,18 @@ fn every_bad_frame_permanently_poisons_the_decoder() {
         assert_eq!(decoder.push(&frame(b"{}")), Err(FrameError::Poisoned));
         assert_eq!(decoder.finish(), Err(FrameError::Poisoned));
     }
+}
+
+#[test]
+fn accepts_a_valid_exact_sixty_four_mebibyte_request_without_allocating_from_the_header() {
+    let mut payload = Vec::with_capacity(MAX_NATIVE_REQUEST_BYTES);
+    payload.push(b'"');
+    payload.resize(MAX_NATIVE_REQUEST_BYTES - 1, b'a');
+    payload.push(b'"');
+    assert_eq!(payload.len(), MAX_NATIVE_REQUEST_BYTES);
+
+    let mut decoder = FrameDecoder::new();
+    let decoded = decoder.push(&frame(&payload)).unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoder.finish(), Ok(()));
 }

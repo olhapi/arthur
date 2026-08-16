@@ -247,7 +247,7 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
                 || !uuid(session_id)
                 || !absolute(destination)
                 || !bounded(title, 512)
-                || js_length(markdown) > 20 * 1024 * 1024
+                || js_length(markdown) > 10 * 1024 * 1024
             {
                 return Err(ProtocolError::Invalid);
             }
@@ -268,7 +268,7 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
             };
             if !bounded(request_id, 128)
                 || !uuid(session_id)
-                || !bounded(media_id, 128)
+                || !uuid(media_id)
                 || !mime(content_type)
                 || !js_safe_integer(*byte_length)
                 || *byte_length > max
@@ -284,7 +284,7 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
             data,
             ..
         } => {
-            if !uuid(session_id) || !bounded(media_id, 128) || !js_safe_integer(*sequence) {
+            if !uuid(session_id) || !uuid(media_id) || !js_safe_integer(*sequence) {
                 return Err(ProtocolError::Invalid);
             }
             if data.is_empty() {
@@ -312,7 +312,7 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
         } => {
             if !bounded(request_id, 128)
                 || !uuid(session_id)
-                || !bounded(media_id, 128)
+                || !uuid(media_id)
                 || !js_safe_integer(*chunks)
             {
                 return Err(ProtocolError::Invalid);
@@ -373,7 +373,7 @@ fn validate_host(message: &mut HostMessage) -> Result<(), ProtocolError> {
             sequence,
         } => (bounded(request_id, 128)
             && session_id.as_deref().is_none_or(uuid)
-            && optional_bounded(media_id, 128)
+            && media_id.as_deref().is_none_or(uuid)
             && optional_js_safe_integer(*sequence))
         .then_some(())
         .ok_or(ProtocolError::Invalid),

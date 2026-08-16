@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ClientMessageSchema, HostMessageSchema } from "./protocol.js";
 
 const sessionId = "a5a74c85-92de-4a5d-9768-4e66c4d64987";
+const mediaId = "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832";
 
 describe("ClientMessageSchema", () => {
   it("accepts a versioned hello request", () => {
@@ -20,7 +21,7 @@ describe("ClientMessageSchema", () => {
       ClientMessageSchema.parse({
         type: "media_chunk",
         sessionId,
-        mediaId: "m1",
+        mediaId,
         sequence: -1,
         data: "AA==",
       }),
@@ -49,7 +50,7 @@ describe("ClientMessageSchema", () => {
       ClientMessageSchema.parse({
         type: "media_chunk",
         sessionId,
-        mediaId: "m1",
+        mediaId,
         sequence: 0,
         data: "not base64!",
       }),
@@ -61,7 +62,7 @@ describe("ClientMessageSchema", () => {
       ClientMessageSchema.parse({
         type: "media_chunk",
         sessionId,
-        mediaId: "m1",
+        mediaId,
         sequence: 0,
         data: Buffer.alloc(262_144).toString("base64"),
       }),
@@ -73,9 +74,49 @@ describe("ClientMessageSchema", () => {
       ClientMessageSchema.parse({
         type: "media_chunk",
         sessionId,
-        mediaId: "m1",
+        mediaId,
         sequence: 0,
         data: Buffer.alloc(262_145).toString("base64"),
+      }),
+    ).toThrow();
+  });
+
+  it("requires UUID media identifiers and a 10 MiB UTF-16 Markdown limit", () => {
+    expect(() =>
+      ClientMessageSchema.parse({
+        type: "begin_media",
+        requestId: "media",
+        sessionId,
+        mediaId: "m1",
+        source: "https://cdn.example.test/hero.webp",
+        kind: "image",
+        contentType: "image/webp",
+        byteLength: 0,
+      }),
+    ).toThrow();
+
+    const atLimit = "😀".repeat(5 * 1024 * 1024);
+    expect(atLimit.length).toBe(10 * 1024 * 1024);
+    expect(() =>
+      ClientMessageSchema.parse({
+        type: "begin_save",
+        requestId: "save-limit",
+        sessionId,
+        destination: "/Vault/Clippings",
+        source: "https://example.test/article",
+        title: "An article",
+        markdown: atLimit,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      ClientMessageSchema.parse({
+        type: "begin_save",
+        requestId: "save-over-limit",
+        sessionId,
+        destination: "/Vault/Clippings",
+        source: "https://example.test/article",
+        title: "An article",
+        markdown: `${atLimit}x`,
       }),
     ).toThrow();
   });
