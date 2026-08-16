@@ -26,6 +26,7 @@ class TransferPort implements NativePortAdapter {
   readonly onMessage = new Listeners<unknown>();
   readonly onDisconnect = new Listeners<void>();
   acknowledgeChunks = true;
+  disconnectAfterChunkAck = false;
   fallbackOnEnd = false;
   disconnectCalls = 0;
   throwOnMessageType: string | undefined;
@@ -43,6 +44,7 @@ class TransferPort implements NativePortAdapter {
           mediaId: posted.mediaId,
           sequence: posted.sequence,
         });
+        if (this.disconnectAfterChunkAck) this.onDisconnect.emit(undefined);
       });
     }
     if (posted.type === "begin_save" || posted.type === "begin_media") {
@@ -258,6 +260,19 @@ describe("transferMedia", () => {
     );
 
     expect(port.disconnectCalls).toBe(1);
+    expect(port.posted.some((message) => message.type === "end_media")).toBe(false);
+    expect(client.sessionId).toBeUndefined();
+  });
+
+  it("preserves disconnect when it follows a valid chunk acknowledgement before transfer continues", async () => {
+    const port = new TransferPort();
+    port.disconnectAfterChunkAck = true;
+    const client = await activeClient(port);
+
+    await expect(transferMedia(prepared(new Response(new Uint8Array([1]))), client)).rejects.toBeInstanceOf(
+      NativeDisconnectedError,
+    );
+
     expect(port.posted.some((message) => message.type === "end_media")).toBe(false);
     expect(client.sessionId).toBeUndefined();
   });

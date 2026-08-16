@@ -57,6 +57,9 @@ class FakeNativePort implements NativePortAdapter {
   }
 
   emitDisconnect(): void {
+    this.disconnected = true;
+    this.hostTransactionActive = false;
+    this.destinationLocked = false;
     this.onDisconnect.emit(undefined);
   }
 }
@@ -64,6 +67,10 @@ class FakeNativePort implements NativePortAdapter {
 function sequentialRequestIds(): () => string {
   let next = 0;
   return () => `request-${++next}`;
+}
+
+async function settlePromiseContinuations(): Promise<void> {
+  for (let index = 0; index < 10; index += 1) await Promise.resolve();
 }
 
 async function beginSave(client: NativeClient, port: FakeNativePort): Promise<void> {
@@ -150,6 +157,55 @@ describe("NativeClient", () => {
     await expect(chunk).resolves.toMatchObject({ type: "ack", requestId: "chunk" });
   });
 
+  it("rejects begin_save when disconnect follows its acknowledgement before the continuation", async () => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });
+    const beginning = client.beginSave({
+      sessionId: SESSION_ID,
+      destination: "/Vault/Clippings",
+      source: "https://example.test/article",
+      title: "Article",
+      markdown: "Article",
+    });
+
+    port.emitMessage({ type: "ack", requestId: "request-1", sessionId: SESSION_ID });
+    port.emitDisconnect();
+
+    await expect(beginning).rejects.toBeInstanceOf(NativeDisconnectedError);
+    expect(client.sessionId).toBeUndefined();
+    expect(port.hostTransactionActive).toBe(false);
+    expect(port.destinationLocked).toBe(false);
+    await expect(
+      client.beginSave({
+        sessionId: SESSION_ID,
+        destination: "/Vault/Clippings",
+        source: "https://example.test/article",
+        title: "Another article",
+        markdown: "Another article",
+      }),
+    ).rejects.toBeInstanceOf(NativeDisconnectedError);
+  });
+
+  it("rejects commit when disconnect follows its save result before the continuation", async () => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });
+    await beginSave(client, port);
+    const commit = client.commitSave();
+
+    port.emitMessage({
+      type: "save_result",
+      requestId: "request-2",
+      sessionId: SESSION_ID,
+      savedPath: "/Vault/Clippings/Article.md",
+    });
+    port.emitDisconnect();
+
+    await expect(commit).rejects.toBeInstanceOf(NativeDisconnectedError);
+    expect(client.sessionId).toBeUndefined();
+    expect(port.hostTransactionActive).toBe(false);
+    expect(port.destinationLocked).toBe(false);
+  });
+
   it("terminally closes an active host when commit posting throws and rejects concurrent pending work once", async () => {
     const port = new FakeNativePort();
     const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });
@@ -214,8 +270,7 @@ describe("NativeClient", () => {
     });
 
     port.emitMessage(response);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settlePromiseContinuations();
 
     expect(rejections).toBe(1);
     expect(rejection).toBeInstanceOf(NativeProtocolError);
@@ -246,7 +301,7 @@ describe("NativeClient", () => {
     if (!throwOnPost) {
       port.emitMessage({ type: "ack", requestId: "chunk", sessionId: SESSION_ID, mediaId: MEDIA_ID, sequence });
     }
-    await Promise.resolve();
+    await settlePromiseContinuations();
 
     expect(rejections).toBe(1);
     expect(port.disconnectCalls).toBe(1);

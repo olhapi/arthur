@@ -174,6 +174,7 @@ export class NativeClient {
   private session: ActiveSession | undefined;
   private beginning = false;
   private closed = false;
+  private terminalError: Error | undefined;
   private readonly createRequestId: () => string;
   private readonly limits: NativeClientLimits;
 
@@ -203,7 +204,7 @@ export class NativeClient {
     if (outgoing.requestId === "chunk") {
       return Promise.reject(new NativeStateError("The chunk acknowledgement request ID is reserved."));
     }
-    if (this.closed) return Promise.reject(new NativeDisconnectedError());
+    if (this.closed) return Promise.reject(this.terminalError ?? new NativeDisconnectedError());
     if (this.pendingRequests.has(outgoing.requestId)) {
       return Promise.reject(new NativeStateError("A request with this request ID is already pending."));
     }
@@ -227,7 +228,7 @@ export class NativeClient {
     if (chunk.type !== "media_chunk") {
       return Promise.reject(new NativeProtocolError("The media chunk violates the shared protocol."));
     }
-    if (this.closed) return Promise.reject(new NativeDisconnectedError());
+    if (this.closed) return Promise.reject(this.terminalError ?? new NativeDisconnectedError());
     if (this.pendingChunk !== undefined) {
       return Promise.reject(new NativeStateError("Only one media chunk may be in flight."));
     }
@@ -253,7 +254,7 @@ export class NativeClient {
     activeMedia.bytes += byteLength;
     session.bytes += byteLength;
 
-    return new Promise<HostMessage>((resolve, reject) => {
+    const pending = new Promise<HostMessage>((resolve, reject) => {
       const pending: PendingChunk = {
         resolve,
         reject,
@@ -268,11 +269,16 @@ export class NativeClient {
         this.terminate(new NativeDisconnectedError());
       }
     });
+    return pending.then((response) => {
+      this.throwIfTerminal();
+      return response;
+    });
   }
 
   async hello(): Promise<Extract<HostMessage, { type: "hello_result" }>> {
     const requestId = this.nextRequestId();
     const response = await this.request({ type: "hello", requestId, protocolVersion: PROTOCOL_VERSION });
+    this.throwIfTerminal();
     if (response.type !== "hello_result" || response.requestId !== requestId) {
       throw new NativeProtocolError("The native host returned an unexpected hello response.");
     }
@@ -288,6 +294,7 @@ export class NativeClient {
     try {
       const requestId = this.nextRequestId();
       const response = await this.request({ type: "begin_save", requestId, ...input });
+      this.throwIfTerminal();
       expectAck(response, requestId, input.sessionId);
       this.session = { id: input.sessionId, bytes: 0, media: new Map() };
     } finally {
@@ -317,6 +324,7 @@ export class NativeClient {
       contentType: input.contentType,
       byteLength: input.declaredBytes ?? 0,
     });
+    this.throwIfTerminal();
     expectAck(response, requestId, session.id);
     session.media.set(input.mediaId, { kind: input.kind, bytes: 0 });
   }
@@ -334,6 +342,7 @@ export class NativeClient {
       mediaId,
       chunks,
     });
+    this.throwIfTerminal();
     if (
       (response.type !== "ack" && response.type !== "warning") ||
       response.requestId !== requestId ||
@@ -351,6 +360,7 @@ export class NativeClient {
     const requestId = this.nextRequestId();
     try {
       const response = await this.request({ type: "commit_save", requestId, sessionId: session.id });
+      this.throwIfTerminal();
       if (response.type !== "save_result" || response.requestId !== requestId || response.sessionId !== session.id) {
         throw new NativeProtocolError("The native host returned an unexpected save result.");
       }
@@ -371,6 +381,7 @@ export class NativeClient {
         ...(reason === undefined ? {} : { reason }),
       };
       const response = await this.request(request);
+      this.throwIfTerminal();
       expectAck(response, requestId, session.id);
     } finally {
       this.resetSession();
@@ -389,6 +400,7 @@ export class NativeClient {
   }
 
   private requireSession(): ActiveSession {
+    this.throwIfTerminal();
     if (this.session === undefined) throw new NativeStateError("No save session is active.");
     return this.session;
   }
@@ -452,8 +464,10 @@ export class NativeClient {
 
   private handleDisconnect(): void {
     if (this.closed) return;
+    const error = new NativeDisconnectedError();
     this.closed = true;
-    this.failAll(new NativeDisconnectedError());
+    this.terminalError = error;
+    this.failAll(error);
   }
 
   private hasActiveSession(): boolean {
@@ -463,6 +477,7 @@ export class NativeClient {
   private terminate(error: Error): void {
     if (this.closed) return;
     this.closed = true;
+    this.terminalError = error;
     try {
       this.port.disconnect();
     } catch {
@@ -471,6 +486,10 @@ export class NativeClient {
     } finally {
       this.failAll(error);
     }
+  }
+
+  private throwIfTerminal(): void {
+    if (this.terminalError !== undefined) throw this.terminalError;
   }
 
   private resolveRequest(requestId: string, response: HostMessage): void {
