@@ -223,13 +223,9 @@ fn eof_aborts_an_active_session_without_replacing_the_old_note() {
     assert_eq!(messages.len(), 1);
     assert!(matches!(messages[0], HostMessage::Ack { .. }));
     assert_eq!(fs::read(&note).unwrap(), original);
-    assert!(fs::read_dir(&destination).unwrap().all(|entry| {
-        !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".arthur-stage-")
-    }));
+    let slot = destination.join(".arthur-workspace-v1/slot-0");
+    assert_eq!(fs::metadata(slot.join("new-note")).unwrap().len(), 0);
+    assert_eq!(fs::metadata(slot.join("old-backup")).unwrap().len(), 0);
     fs::remove_dir_all(destination).unwrap();
 }
 

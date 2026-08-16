@@ -2,39 +2,20 @@ use super::{
     Vault, VaultError, frontmatter, fs,
     names::{
         self, content_addressed_name, media_stem_and_extension, normalize_source, sanitize_stem,
-        validate_basename,
     },
+    workspace::{self, JournalPhase},
 };
 use crate::protocol::MediaKind;
 use crate::validation::zod_uuid;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, fs::File, io::Write, os::fd::OwnedFd, path::PathBuf};
 
-const STAGE_PREFIX: &str = ".arthur-stage-";
 const MAX_CHUNK_BYTES: usize = 256 * 1024;
 const IMAGE_LIMIT: u64 = 100 * 1024 * 1024;
 const AUDIO_VIDEO_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 const TOTAL_MEDIA_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const FALLBACK_CODE: &str = "media_fallback";
 const FALLBACK_MESSAGE: &str = "Media transfer was incomplete; original link was retained.";
-const MAX_EXCHANGE_JOURNAL_BYTES: usize = 2048;
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExchangeJournal {
-    target: String,
-    temporary: String,
-    backup: String,
-    old: fs::FileFingerprint,
-    new: fs::FileFingerprint,
-}
-
-enum RecoveryDisposition {
-    ReadyToReap,
-    FinalizedPreserve,
-    Preserve,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NoteIdentity {
@@ -59,6 +40,10 @@ fn note_identity(
     } else {
         NoteIdentity::Unknown
     }
+}
+
+fn same_content(left: &fs::FileFingerprint, right: &fs::FileFingerprint) -> bool {
+    left.size == right.size && left.sha256 == right.sha256
 }
 
 #[derive(Debug, Clone)]
@@ -97,8 +82,7 @@ struct ActiveMedia {
     declared_bytes: Option<u64>,
     reserved_bytes: u64,
     maximum_bytes: u64,
-    temp_name: String,
-    file: File,
+    workspace_index: usize,
     hasher: Sha256,
     bytes: u64,
     next_sequence: u64,
@@ -107,10 +91,10 @@ struct ActiveMedia {
 }
 
 struct FinishedMedia {
-    temp_name: Option<String>,
+    workspace_index: usize,
+    in_workspace: bool,
     attachment_name: String,
     digest: String,
-    staged_file: File,
     retained: Option<VerifiedAttachment>,
 }
 
@@ -122,21 +106,23 @@ struct VerifiedAttachment {
 enum MediaState {
     Active(ActiveMedia),
     Finished(FinishedMedia),
-    Fallback { source: String, awaiting_end: bool },
+    Fallback {
+        source: String,
+        awaiting_end: bool,
+        workspace_index: usize,
+    },
 }
 
 pub struct VaultTransaction {
     destination: OwnedFd,
     attachments: OwnedFd,
     canonical_destination: PathBuf,
-    stage: OwnedFd,
-    stage_name: String,
+    slot: workspace::Slot,
     save: SaveSpec,
     media: HashMap<String, MediaState>,
-    next_temp: u64,
+    next_media: usize,
     total_bytes: u64,
     declared_total: u64,
-    stage_live: bool,
     #[cfg(test)]
     commit_fault: Option<CommitFault>,
     #[cfg(test)]
@@ -167,23 +153,6 @@ fn exact_placeholder_id_length(value: &str) -> Option<usize> {
     Some(UUID_BYTES)
 }
 
-fn stage_name(session_id: &str) -> Result<String, VaultError> {
-    if !zod_uuid(session_id) {
-        return Err(VaultError::InvalidTransition);
-    }
-    Ok(format!("{STAGE_PREFIX}{session_id}"))
-}
-
-fn is_stage_name(value: &str) -> bool {
-    value.strip_prefix(STAGE_PREFIX).is_some_and(zod_uuid)
-}
-
-fn is_reaper_name(value: &str) -> bool {
-    value.strip_prefix(".arthur-reap-").is_some_and(|value| {
-        value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
-}
-
 fn trim_required(value: String, maximum: usize) -> Result<String, VaultError> {
     let value = value.trim().to_owned();
     if value.is_empty() || utf16_length(&value) > maximum {
@@ -193,7 +162,9 @@ fn trim_required(value: String, maximum: usize) -> Result<String, VaultError> {
 }
 
 fn normalize_save_spec(mut spec: SaveSpec) -> Result<SaveSpec, VaultError> {
-    stage_name(&spec.session_id)?;
+    if !zod_uuid(&spec.session_id) {
+        return Err(VaultError::InvalidTransition);
+    }
     spec.title = trim_required(spec.title, 512)?;
     if utf16_length(&spec.markdown) > 10 * 1024 * 1024 {
         return Err(VaultError::InvalidName);
@@ -247,201 +218,21 @@ fn verified_attachment(
     Ok(VerifiedAttachment { file, fingerprint })
 }
 
-pub(super) fn remove_stale_stages(destination: &OwnedFd) -> Result<(), VaultError> {
-    for name in fs::direct_children(destination)? {
-        if is_stage_name(&name) || is_reaper_name(&name) {
-            reclaim_stale_stage(destination, &name);
-        }
-    }
-    Ok(())
-}
-
-fn generated_note_name(value: &str) -> bool {
-    ["note-", "old-note-"].iter().any(|prefix| {
-        value.strip_prefix(prefix).is_some_and(|suffix| {
-            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-        })
-    })
-}
-
-fn valid_fingerprint(value: &fs::FileFingerprint) -> bool {
-    value.sha256.len() == 64 && value.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn valid_exchange_journal(value: &ExchangeJournal) -> bool {
-    validate_basename(&value.target).is_ok()
-        && value.target.ends_with(".md")
-        && validate_basename(&value.temporary).is_ok()
-        && generated_note_name(&value.temporary)
-        && validate_basename(&value.backup).is_ok()
-        && value.backup.starts_with("old-note-")
-        && generated_note_name(&value.backup)
-        && value.backup != value.temporary
-        && valid_fingerprint(&value.old)
-        && valid_fingerprint(&value.new)
-}
-
-fn write_exchange_journal(stage: &OwnedFd, journal: &ExchangeJournal) -> Result<(), VaultError> {
-    let bytes = serde_json::to_vec(&journal).map_err(|_| VaultError::Io)?;
-    if bytes.len() > MAX_EXCHANGE_JOURNAL_BYTES {
-        return Err(VaultError::Io);
-    }
-    fs::write_private_metadata(stage, fs::EXCHANGE_JOURNAL, &bytes)
-}
-
-fn restore_old_visibility(
-    destination: &OwnedFd,
-    stage: &OwnedFd,
-    journal: &ExchangeJournal,
-    target: NoteIdentity,
-    temporary: NoteIdentity,
-    backup: NoteIdentity,
-) -> Result<bool, VaultError> {
-    if target == NoteIdentity::Old {
-        return Ok(true);
-    }
-    let old_name = if temporary == NoteIdentity::Old {
-        Some(journal.temporary.as_str())
-    } else if backup == NoteIdentity::Old {
-        Some(journal.backup.as_str())
-    } else {
-        None
-    };
-    let Some(old_name) = old_name else {
-        return Ok(false);
-    };
-    match target {
-        NoteIdentity::Missing => {
-            fs::rename_no_replace_between(stage, old_name, destination, &journal.target)?
-        }
-        NoteIdentity::New | NoteIdentity::Unknown => {
-            fs::rename_exchange_between(stage, old_name, destination, &journal.target)?;
-            fs::sync_owned_directory(stage)?;
-            fs::sync_owned_directory(destination)?;
-        }
-        NoteIdentity::Old => return Ok(true),
-    }
-    Ok(
-        note_identity(destination, &journal.target, &journal.old, &journal.new)
-            == NoteIdentity::Old,
-    )
-}
-
-fn recover_exchange_journal(
-    destination: &OwnedFd,
-    reaper: &fs::ReaperedStage,
-) -> RecoveryDisposition {
-    let exists = match fs::child_exists(&reaper.directory, fs::EXCHANGE_JOURNAL) {
-        Ok(exists) => exists,
-        Err(_) => return RecoveryDisposition::Preserve,
-    };
-    if !exists {
-        return RecoveryDisposition::ReadyToReap;
-    }
-    let mut journal_file = match fs::open_regular_file(&reaper.directory, fs::EXCHANGE_JOURNAL) {
-        Ok(file) => file,
-        Err(_) => return RecoveryDisposition::Preserve,
-    };
-    let bytes = match fs::read_open_file_prefix(&mut journal_file, MAX_EXCHANGE_JOURNAL_BYTES + 1) {
-        Ok(bytes) if bytes.len() <= MAX_EXCHANGE_JOURNAL_BYTES => bytes,
-        _ => return RecoveryDisposition::Preserve,
-    };
-    let journal: ExchangeJournal = match serde_json::from_slice(&bytes) {
-        Ok(journal) if valid_exchange_journal(&journal) => journal,
-        _ => return RecoveryDisposition::Preserve,
-    };
-    let children = match fs::direct_children(&reaper.directory) {
-        Ok(children) => children,
-        Err(_) => return RecoveryDisposition::Preserve,
-    };
-    if children.len() != 4
-        || ![
-            fs::STAGE_OWNER_MARKER,
-            fs::EXCHANGE_JOURNAL,
-            &journal.temporary,
-            &journal.backup,
-        ]
-        .iter()
-        .all(|expected| children.iter().any(|child| child == expected))
-    {
-        return RecoveryDisposition::Preserve;
-    }
-    let target = note_identity(destination, &journal.target, &journal.old, &journal.new);
-    let staged = note_identity(
-        &reaper.directory,
-        &journal.temporary,
-        &journal.old,
-        &journal.new,
-    );
-    let backup = note_identity(
-        &reaper.directory,
-        &journal.backup,
-        &journal.old,
-        &journal.new,
-    );
-
-    if target == NoteIdentity::Old && staged == NoteIdentity::New && backup == NoteIdentity::Old {
-        return RecoveryDisposition::FinalizedPreserve;
-    }
-    if target == NoteIdentity::New && staged == NoteIdentity::Old && backup == NoteIdentity::Old {
-        // A visible new target is finalized before the old, rollback-copy
-        // note can be destroyed. This is required even when the original
-        // process failed after the exchange but before its directory sync.
-        return fs::sync_owned_directory(destination)
-            .map(|()| RecoveryDisposition::FinalizedPreserve)
-            .unwrap_or(RecoveryDisposition::Preserve);
-    }
-    let _ = restore_old_visibility(
-        destination,
-        &reaper.directory,
-        &journal,
-        target,
-        staged,
-        backup,
-    );
-    RecoveryDisposition::Preserve
-}
-
-fn reclaim_stale_stage(destination: &OwnedFd, name: &str) {
-    let already_reaper = is_reaper_name(name);
-    let expected_session = name.strip_prefix(STAGE_PREFIX);
-    let Ok(Some(reaper)) =
-        fs::claim_marked_stage_reaper(destination, name, already_reaper, None, expected_session)
-    else {
-        return;
-    };
-    if !matches!(
-        recover_exchange_journal(destination, &reaper),
-        RecoveryDisposition::ReadyToReap
-    ) || fs::remove_owned_stage_payload(&reaper.directory).is_err()
-    {
-        return;
-    }
-    let _ = fs::finish_marked_stage_reap(destination, reaper, None, expected_session);
-}
-
 impl VaultTransaction {
     pub(super) fn new(vault: Vault, spec: SaveSpec) -> Result<Self, VaultError> {
         let save = normalize_save_spec(spec)?;
-        let stage_name = stage_name(&save.session_id)?;
-        let stage = fs::create_private_child_directory(&vault.destination, &stage_name)?;
-        if let Err(error) = fs::create_stage_ownership_marker(&stage, &save.session_id) {
-            drop(stage);
-            let _ = fs::remove_empty_child_directory(&vault.destination, &stage_name);
-            return Err(error);
-        }
+        let mut slot = vault.workspace.claim()?;
+        slot.begin()?;
         Ok(Self {
             destination: vault.destination,
             attachments: vault.attachments,
             canonical_destination: vault.canonical_destination,
-            stage,
-            stage_name,
+            slot,
             save,
             media: HashMap::new(),
-            next_temp: 0,
+            next_media: 0,
             total_bytes: 0,
             declared_total: 0,
-            stage_live: true,
             #[cfg(test)]
             commit_fault: None,
             #[cfg(test)]
@@ -453,21 +244,15 @@ impl VaultTransaction {
         })
     }
 
-    fn temp_name(&mut self, prefix: &str) -> String {
-        let value = format!("{prefix}-{}", self.next_temp);
-        self.next_temp = self
-            .next_temp
-            .checked_add(1)
-            .expect("temp counter overflow");
-        value
-    }
-
     pub fn begin_media(&mut self, mut spec: MediaSpec) -> Result<(), VaultError> {
         if !zod_uuid(&spec.media_id) {
             return Err(VaultError::InvalidName);
         }
         if self.media.contains_key(&spec.media_id) {
             return Err(VaultError::InvalidTransition);
+        }
+        if self.next_media >= workspace::MAX_MEDIA_PER_SAVE {
+            return Err(VaultError::MediaLimitExceeded);
         }
         spec.source = normalize_source(&spec.source)?;
         spec.content_type = normalize_content_type(spec.content_type)?;
@@ -496,8 +281,9 @@ impl VaultTransaction {
             None => self.declared_total,
         };
         let (stem, extension) = media_stem_and_extension(&spec.source, &spec.content_type)?;
-        let temp_name = self.temp_name("media");
-        let file = fs::create_exclusive_file(&self.stage, &temp_name)?;
+        let workspace_index = self.next_media;
+        self.slot.ensure_media(workspace_index)?;
+        self.next_media += 1;
         self.declared_total = next_declared_total;
         self.media.insert(
             spec.media_id,
@@ -506,8 +292,7 @@ impl VaultTransaction {
                 declared_bytes: spec.declared_bytes,
                 reserved_bytes: spec.declared_bytes.unwrap_or_default(),
                 maximum_bytes,
-                temp_name,
-                file,
+                workspace_index,
                 hasher: Sha256::new(),
                 bytes: 0,
                 next_sequence: 0,
@@ -563,17 +348,25 @@ impl VaultTransaction {
             #[cfg(test)]
             {
                 if let Some(partial) = self.partial_write_after.take() {
-                    match media.file.write_all(&bytes[..partial.min(bytes.len())]) {
+                    match self
+                        .slot
+                        .media_file_mut(media.workspace_index)?
+                        .write_all(&bytes[..partial.min(bytes.len())])
+                    {
                         Ok(()) => Err(std::io::Error::other("injected partial write failure")),
                         Err(error) => Err(error),
                     }
                 } else {
-                    media.file.write_all(bytes)
+                    self.slot
+                        .media_file_mut(media.workspace_index)?
+                        .write_all(bytes)
                 }
             }
             #[cfg(not(test))]
             {
-                media.file.write_all(bytes)
+                self.slot
+                    .media_file_mut(media.workspace_index)?
+                    .write_all(bytes)
             }
         };
         if write_result.is_err() {
@@ -612,12 +405,14 @@ impl VaultTransaction {
             MediaState::Fallback {
                 source,
                 awaiting_end: true,
+                workspace_index,
             } => {
                 self.media.insert(
                     media_id.to_owned(),
                     MediaState::Fallback {
                         source,
                         awaiting_end: false,
+                        workspace_index,
                     },
                 );
                 return Ok(MediaDisposition::Fallback {
@@ -645,10 +440,10 @@ impl VaultTransaction {
         let sync_result = if std::mem::take(&mut self.fail_media_sync) {
             Err(VaultError::Io)
         } else {
-            fs::sync_file(&media.file)
+            fs::sync_file(self.slot.media_file(media.workspace_index)?)
         };
         #[cfg(not(test))]
-        let sync_result = fs::sync_file(&media.file);
+        let sync_result = fs::sync_file(self.slot.media_file(media.workspace_index)?);
         if sync_result.is_err() {
             self.fallback_media(media_id, media, false);
             return Ok(MediaDisposition::Fallback {
@@ -665,10 +460,10 @@ impl VaultTransaction {
         self.media.insert(
             media_id.to_owned(),
             MediaState::Finished(FinishedMedia {
-                temp_name: Some(media.temp_name),
+                workspace_index: media.workspace_index,
+                in_workspace: true,
                 attachment_name,
                 digest,
-                staged_file: media.file,
                 retained: None,
             }),
         );
@@ -679,18 +474,20 @@ impl VaultTransaction {
         let ActiveMedia {
             source,
             reserved_bytes,
-            temp_name,
-            file,
+            workspace_index,
             ..
         } = media;
-        drop(file);
         self.declared_total = self.declared_total.saturating_sub(reserved_bytes);
-        let _ = fs::remove_child(&self.stage, &temp_name);
+        let _ = self
+            .slot
+            .media_file_mut(workspace_index)
+            .and_then(|file| fs::reset_file(file, b""));
         self.media.insert(
             media_id.to_owned(),
             MediaState::Fallback {
                 source,
                 awaiting_end,
+                workspace_index,
             },
         );
     }
@@ -718,6 +515,7 @@ impl VaultTransaction {
                     MediaState::Fallback {
                         source,
                         awaiting_end: false,
+                        ..
                     } => {
                         rendered.push('<');
                         rendered.push_str(source);
@@ -756,19 +554,26 @@ impl VaultTransaction {
         media_id: &str,
         first_rename: &mut bool,
     ) -> Result<(), VaultError> {
-        let (temp_name, attachment_name, digest) = match self.media.get(media_id) {
-            Some(MediaState::Finished(media)) => (
-                media.temp_name.clone(),
-                media.attachment_name.clone(),
-                media.digest.clone(),
-            ),
-            _ => return Ok(()),
-        };
-        let Some(temp_name) = temp_name else {
+        let (workspace_index, in_workspace, attachment_name, digest) =
+            match self.media.get(media_id) {
+                Some(MediaState::Finished(media)) => (
+                    media.workspace_index,
+                    media.in_workspace,
+                    media.attachment_name.clone(),
+                    media.digest.clone(),
+                ),
+                _ => return Ok(()),
+            };
+        if !in_workspace {
             return Ok(());
-        };
+        }
         if !fs::child_directory_matches(&self.destination, "attachments", &self.attachments)? {
             return Err(VaultError::UnsafeChild);
+        }
+        let staged = fs::fingerprint_open_regular_file(self.slot.media_file_mut(workspace_index)?)?;
+        if staged.sha256 != digest || !self.slot.media_path_matches(workspace_index)? {
+            self.slot.quarantine();
+            return Err(VaultError::AttachmentConflict);
         }
         if fs::child_exists(&self.attachments, &attachment_name)? {
             let retained = verified_attachment(&self.attachments, &attachment_name, &digest)?;
@@ -783,16 +588,18 @@ impl VaultTransaction {
             }
             *first_rename = true;
         }
+        let fixed_name = workspace::Slot::fixed_media_name(workspace_index)?;
         match fs::rename_no_replace_between(
-            &self.stage,
-            &temp_name,
+            &self.slot.directory,
+            &fixed_name,
             &self.attachments,
             &attachment_name,
         ) {
             Ok(()) => {
                 let retained = verified_attachment(&self.attachments, &attachment_name, &digest)?;
+                self.slot.recreate_media(workspace_index)?;
                 if let Some(MediaState::Finished(media)) = self.media.get_mut(media_id) {
-                    media.temp_name = None;
+                    media.in_workspace = false;
                     media.retained = Some(retained);
                 }
                 Ok(())
@@ -815,58 +622,67 @@ impl VaultTransaction {
         for media_id in media_ids {
             self.install_one_attachment(&media_id, &mut first_rename)?;
         }
-        fs::sync_owned_directory(&self.attachments)
-    }
-
-    fn preserve_attachment_conflict(&mut self) {
-        let _ = fs::write_private_metadata(
-            &self.stage,
-            ".arthur-attachment-conflict-v1",
-            b"arthur-attachment-conflict-v1\n",
-        );
-        self.stage_live = false;
+        fs::sync_owned_directory(&self.attachments)?;
+        if !fs::child_directory_matches(&self.destination, "attachments", &self.attachments)? {
+            self.slot.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        Ok(())
     }
 
     fn revalidate_attachments(&mut self) -> Result<(), VaultError> {
+        if !fs::child_directory_matches(&self.destination, "attachments", &self.attachments)? {
+            self.slot.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
         let mut media_ids: Vec<String> = self.media.keys().cloned().collect();
         media_ids.sort();
         for media_id in media_ids {
             let result = self.revalidate_one_attachment(&media_id);
             if result.is_err() {
-                self.preserve_attachment_conflict();
+                self.slot.quarantine();
                 return result;
             }
         }
-        fs::sync_owned_directory(&self.attachments)
+        fs::sync_owned_directory(&self.attachments)?;
+        if !fs::child_directory_matches(&self.destination, "attachments", &self.attachments)? {
+            self.slot.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        Ok(())
     }
 
     fn revalidate_one_attachment(&mut self, media_id: &str) -> Result<(), VaultError> {
-        let Some(MediaState::Finished(media)) = self.media.get_mut(media_id) else {
+        let Some(MediaState::Finished(snapshot)) = self.media.get(media_id) else {
             return Ok(());
         };
-        let held_staged = fs::fingerprint_open_regular_file(&mut media.staged_file)?;
-        if held_staged.sha256 != media.digest {
-            return Err(VaultError::AttachmentConflict);
+        let workspace_index = snapshot.workspace_index;
+        let in_workspace = snapshot.in_workspace;
+        let attachment_name = snapshot.attachment_name.clone();
+        let digest = snapshot.digest.clone();
+        if in_workspace {
+            let held =
+                fs::fingerprint_open_regular_file(self.slot.media_file_mut(workspace_index)?)?;
+            if held.sha256 != digest || !self.slot.media_path_matches(workspace_index)? {
+                return Err(VaultError::AttachmentConflict);
+            }
         }
-        if let Some(temp_name) = media.temp_name.clone()
-            && !fs::regular_file_matches_fingerprint(&self.stage, &temp_name, &held_staged)?
-        {
-            return Err(VaultError::AttachmentConflict);
-        }
+        let Some(MediaState::Finished(media)) = self.media.get_mut(media_id) else {
+            unreachable!()
+        };
         if let Some(retained) = media.retained.as_mut()
             && (fs::fingerprint_open_regular_file(&mut retained.file)? != retained.fingerprint
-                || retained.fingerprint.sha256 != media.digest)
+                || retained.fingerprint.sha256 != digest)
         {
             return Err(VaultError::AttachmentConflict);
         }
-        match verified_attachment(&self.attachments, &media.attachment_name, &media.digest) {
+        match verified_attachment(&self.attachments, &attachment_name, &digest) {
             Ok(retained) => {
                 media.retained = Some(retained);
                 Ok(())
             }
-            Err(VaultError::UnsafeChild) if media.temp_name.is_some() => {
-                let temp_name = media.temp_name.clone().expect("checked staged attachment");
-                if fs::child_exists(&self.attachments, &media.attachment_name)? {
+            Err(VaultError::UnsafeChild) if in_workspace => {
+                if fs::child_exists(&self.attachments, &attachment_name)? {
                     return Err(VaultError::AttachmentConflict);
                 }
                 #[cfg(test)]
@@ -877,33 +693,35 @@ impl VaultTransaction {
                     std::fs::write(
                         self.canonical_destination
                             .join("attachments")
-                            .join(&media.attachment_name),
+                            .join(&attachment_name),
                         b"test",
                     )
                     .map_err(|_| VaultError::Io)?;
                 }
+                let fixed_name = workspace::Slot::fixed_media_name(workspace_index)?;
                 match fs::rename_no_replace_between(
-                    &self.stage,
-                    &temp_name,
+                    &self.slot.directory,
+                    &fixed_name,
                     &self.attachments,
-                    &media.attachment_name,
+                    &attachment_name,
                 ) {
                     Ok(()) => {
-                        let retained = verified_attachment(
-                            &self.attachments,
-                            &media.attachment_name,
-                            &media.digest,
-                        )?;
-                        media.temp_name = None;
+                        let retained =
+                            verified_attachment(&self.attachments, &attachment_name, &digest)?;
+                        self.slot.recreate_media(workspace_index)?;
+                        let Some(MediaState::Finished(media)) = self.media.get_mut(media_id) else {
+                            unreachable!()
+                        };
+                        media.in_workspace = false;
                         media.retained = Some(retained);
                         Ok(())
                     }
                     Err(VaultError::AttachmentConflict) => {
-                        let retained = verified_attachment(
-                            &self.attachments,
-                            &media.attachment_name,
-                            &media.digest,
-                        )?;
+                        let retained =
+                            verified_attachment(&self.attachments, &attachment_name, &digest)?;
+                        let Some(MediaState::Finished(media)) = self.media.get_mut(media_id) else {
+                            unreachable!()
+                        };
                         media.retained = Some(retained);
                         Ok(())
                     }
@@ -929,20 +747,6 @@ impl VaultTransaction {
         Ok((format!("{stem}--{}.md", &source_hash[..12]), None))
     }
 
-    fn write_note_temp(&mut self, note: &[u8]) -> Result<String, VaultError> {
-        let name = self.temp_name("note");
-        let mut file = fs::create_exclusive_file(&self.stage, &name)?;
-        let result = file
-            .write_all(note)
-            .map_err(|_| VaultError::Io)
-            .and_then(|()| fs::sync_file(&file));
-        drop(file);
-        if result.is_err() {
-            let _ = fs::remove_child(&self.stage, &name);
-        }
-        result.map(|()| name)
-    }
-
     fn commit_inner(&mut self) -> Result<SavedNote, VaultError> {
         if self.has_open_media() {
             return Err(VaultError::InvalidTransition);
@@ -952,7 +756,7 @@ impl VaultTransaction {
         let serialized =
             frontmatter::serialize_note(&self.save.title, &self.save.source, &markdown)?;
         let (target, existing) = self.note_target()?;
-        let temporary_note = self.write_note_temp(serialized.as_bytes())?;
+        let new_fingerprint = self.slot.write_new_note(serialized.as_bytes())?;
         if self.fault_before_note_rename() {
             return Err(VaultError::Io);
         }
@@ -968,9 +772,6 @@ impl VaultTransaction {
             )? {
                 return Err(VaultError::SourceConflict);
             }
-            let mut new_file = fs::open_regular_file(&self.stage, &temporary_note)?;
-            let new_fingerprint = fs::fingerprint_open_regular_file(&mut new_file)?;
-            let backup_note = self.temp_name("old-note");
             if !fs::regular_file_matches_fingerprint(
                 &self.destination,
                 &target,
@@ -978,37 +779,27 @@ impl VaultTransaction {
             )? {
                 return Err(VaultError::SourceConflict);
             }
-            fs::hard_link_no_replace_between(
-                &self.destination,
-                &target,
-                &self.stage,
-                &backup_note,
-            )?;
-            let backup_matches = fs::regular_file_matches_fingerprint(
-                &self.stage,
-                &backup_note,
-                &existing.fingerprint,
-            )?;
-            let held_old_matches = fs::fingerprint_open_regular_file(&mut existing.verified_file)?
-                == existing.fingerprint;
-            if !backup_matches || !held_old_matches {
-                let _ = fs::remove_child(&self.stage, &backup_note);
+            if fs::identity_open_regular_file(&existing.verified_file).is_err() {
                 return Err(VaultError::SourceConflict);
             }
-            let journal = ExchangeJournal {
-                target: target.clone(),
-                temporary: temporary_note.clone(),
-                backup: backup_note,
-                old: existing.fingerprint.clone(),
-                new: new_fingerprint.clone(),
-            };
-            write_exchange_journal(&self.stage, &journal)?;
+            let backup_fingerprint = self.slot.copy_old_note(&mut existing.verified_file)?;
+            let held_old_matches = fs::fingerprint_open_regular_file(&mut existing.verified_file)?
+                == existing.fingerprint;
+            if !same_content(&backup_fingerprint, &existing.fingerprint) || !held_old_matches {
+                return Err(VaultError::SourceConflict);
+            }
+            self.slot.persist(
+                JournalPhase::ExchangePending,
+                Some(target.clone()),
+                Some(existing.fingerprint.clone()),
+                Some(backup_fingerprint.clone()),
+                Some(new_fingerprint.clone()),
+            )?;
             if self.fault_before_source_exchange() {
-                self.stage_live = false;
                 return Err(VaultError::Io);
             }
             self.inject_source_replacement_before_exchange(&target)?;
-            self.inject_staged_replacement_before_exchange(&temporary_note)?;
+            self.inject_staged_replacement_before_exchange(workspace::NEW_NOTE)?;
             let pre_target = note_identity(
                 &self.destination,
                 &target,
@@ -1016,51 +807,90 @@ impl VaultTransaction {
                 &new_fingerprint,
             );
             let pre_temporary = note_identity(
-                &self.stage,
-                &temporary_note,
+                &self.slot.directory,
+                workspace::NEW_NOTE,
                 &existing.fingerprint,
                 &new_fingerprint,
             );
             let pre_backup = note_identity(
-                &self.stage,
-                &journal.backup,
-                &existing.fingerprint,
+                &self.slot.directory,
+                workspace::OLD_BACKUP,
+                &backup_fingerprint,
                 &new_fingerprint,
             );
             if fs::fingerprint_open_regular_file(&mut existing.verified_file)?
                 != existing.fingerprint
-                || fs::fingerprint_open_regular_file(&mut new_file)? != new_fingerprint
+                || fs::identity_open_regular_file(&existing.verified_file).is_err()
+                || fs::fingerprint_open_regular_file(&mut self.slot.new_note)? != new_fingerprint
+                || !self.slot.verify_fixed_paths()?
                 || pre_target != NoteIdentity::Old
                 || pre_temporary != NoteIdentity::New
                 || pre_backup != NoteIdentity::Old
             {
-                let _ = restore_old_visibility(
+                let _ = self.slot.restore_old_visibility(
                     &self.destination,
-                    &self.stage,
-                    &journal,
-                    pre_target,
-                    pre_temporary,
-                    pre_backup,
+                    &target,
+                    &existing.fingerprint,
+                    &backup_fingerprint,
+                    &new_fingerprint,
                 );
-                self.stage_live = false;
                 return Err(VaultError::SourceConflict);
             }
             self.revalidate_attachments()?;
-            fs::rename_exchange_between(&self.stage, &temporary_note, &self.destination, &target)?;
+            let final_target = note_identity(
+                &self.destination,
+                &target,
+                &existing.fingerprint,
+                &new_fingerprint,
+            );
+            let final_temporary = note_identity(
+                &self.slot.directory,
+                workspace::NEW_NOTE,
+                &existing.fingerprint,
+                &new_fingerprint,
+            );
+            let final_backup = note_identity(
+                &self.slot.directory,
+                workspace::OLD_BACKUP,
+                &backup_fingerprint,
+                &new_fingerprint,
+            );
+            if fs::identity_open_regular_file(&existing.verified_file).is_err()
+                || fs::fingerprint_open_regular_file(&mut existing.verified_file)?
+                    != existing.fingerprint
+                || fs::fingerprint_open_regular_file(&mut self.slot.new_note)? != new_fingerprint
+                || !self.slot.verify_fixed_paths()?
+                || final_target != NoteIdentity::Old
+                || final_temporary != NoteIdentity::New
+                || final_backup != NoteIdentity::Old
+            {
+                let _ = self.slot.restore_old_visibility(
+                    &self.destination,
+                    &target,
+                    &existing.fingerprint,
+                    &backup_fingerprint,
+                    &new_fingerprint,
+                );
+                return Err(VaultError::SourceConflict);
+            }
+            fs::rename_exchange_between(
+                &self.slot.directory,
+                workspace::NEW_NOTE,
+                &self.destination,
+                &target,
+            )?;
             if self.fault_source_exchange_sync() {
-                self.stage_live = false;
+                self.slot.quarantine();
                 return Err(VaultError::Io);
             }
-            if let Err(error) = fs::sync_owned_directory(&self.stage)
+            if let Err(error) = fs::sync_owned_directory(&self.slot.directory)
                 .and_then(|()| fs::sync_owned_directory(&self.destination))
             {
-                // The exchange has already happened. Retain its durable
-                // journal and both notes for `Vault::open` recovery.
-                self.stage_live = false;
+                self.slot.quarantine();
                 return Err(error);
             }
             if self.fault_after_source_exchange() {
-                self.stage_live = false;
+                self.slot.quarantine();
                 return Err(VaultError::Io);
             }
             self.inject_target_replacement_after_exchange(&target)?;
@@ -1071,130 +901,86 @@ impl VaultTransaction {
                 &new_fingerprint,
             );
             let staged_identity = note_identity(
-                &self.stage,
-                &temporary_note,
+                &self.slot.directory,
+                workspace::NEW_NOTE,
                 &existing.fingerprint,
                 &new_fingerprint,
             );
             let backup_identity = note_identity(
-                &self.stage,
-                &journal.backup,
-                &existing.fingerprint,
+                &self.slot.directory,
+                workspace::OLD_BACKUP,
+                &backup_fingerprint,
                 &new_fingerprint,
             );
             if !(target_identity == NoteIdentity::New
                 && staged_identity == NoteIdentity::Old
                 && backup_identity == NoteIdentity::Old)
             {
-                let _ = restore_old_visibility(
+                let _ = self.slot.restore_old_visibility(
                     &self.destination,
-                    &self.stage,
-                    &journal,
-                    target_identity,
-                    staged_identity,
-                    backup_identity,
+                    &target,
+                    &existing.fingerprint,
+                    &backup_fingerprint,
+                    &new_fingerprint,
                 );
-                self.stage_live = false;
                 return Err(VaultError::SourceConflict);
             }
+            self.slot.reopen_new_note(&existing.fingerprint)?;
+            self.slot.persist(
+                JournalPhase::Committed,
+                Some(target.clone()),
+                Some(existing.fingerprint),
+                Some(backup_fingerprint),
+                Some(new_fingerprint),
+            )?;
         } else {
+            self.slot.persist(
+                JournalPhase::ExchangePending,
+                Some(target.clone()),
+                None,
+                None,
+                Some(new_fingerprint.clone()),
+            )?;
             self.revalidate_attachments()?;
+            if !self.slot.verify_fixed_paths()? {
+                self.slot.quarantine();
+                return Err(VaultError::UnsafeChild);
+            }
             fs::rename_no_replace_between(
-                &self.stage,
-                &temporary_note,
+                &self.slot.directory,
+                workspace::NEW_NOTE,
                 &self.destination,
                 &target,
             )?;
+            self.slot.recreate_new_note()?;
+            fs::sync_owned_directory(&self.destination)?;
+            self.slot.persist(
+                JournalPhase::Committed,
+                Some(target.clone()),
+                None,
+                None,
+                Some(new_fingerprint),
+            )?;
         }
-        self.cleanup_stage_after_note()?;
+        // `Committed` is the visibility point. Scratch reset is recoverable on
+        // the next open and must never turn a durable save into a reported
+        // failure.
+        let _ = self.slot.reset_to_empty();
         Ok(SavedNote {
             display_path: self.canonical_destination.join(target),
         })
     }
 
     pub fn commit(mut self) -> Result<SavedNote, VaultError> {
-        let result = self.commit_inner();
-        if result.is_err() {
-            let _ = self.cleanup_stage();
-        }
-        result
-    }
-
-    fn cleanup_stage(&mut self) -> Result<(), VaultError> {
-        self.cleanup_stage_inner(false)
-    }
-
-    fn cleanup_stage_after_note(&mut self) -> Result<(), VaultError> {
-        self.cleanup_stage_inner(true)
-    }
-
-    fn cleanup_stage_inner(&mut self, note_is_visible: bool) -> Result<(), VaultError> {
-        if !self.stage_live {
-            return Ok(());
-        }
-        let cleanup = (|| {
-            if note_is_visible && fs::child_exists(&self.stage, fs::EXCHANGE_JOURNAL)? {
-                for state in self.media.values_mut() {
-                    if let MediaState::Finished(media) = state
-                        && media.temp_name.is_some()
-                    {
-                        media.staged_file.set_len(0).map_err(|_| VaultError::Io)?;
-                        fs::sync_file(&media.staged_file)?;
-                    }
-                }
-            }
-            self.media.clear();
-            if self.fault_stage_cleanup_after_note() {
-                return Err(VaultError::Io);
-            }
-            self.inject_stage_swap_before_detach()?;
-            let Some(reaper) = fs::claim_marked_stage_reaper(
-                &self.destination,
-                &self.stage_name,
-                false,
-                Some(&self.stage),
-                Some(&self.save.session_id),
-            )?
-            else {
-                return Ok(());
-            };
-            if fs::child_exists(&reaper.directory, fs::EXCHANGE_JOURNAL)?
-                && !matches!(
-                    recover_exchange_journal(&self.destination, &reaper),
-                    RecoveryDisposition::ReadyToReap
-                )
-            {
-                return Err(VaultError::SourceConflict);
-            }
-            fs::remove_owned_stage_payload(&reaper.directory)?;
-            if !fs::finish_marked_stage_reap(
-                &self.destination,
-                reaper,
-                Some(&self.stage),
-                Some(&self.save.session_id),
-            )? {
-                return Err(VaultError::UnsafeChild);
-            }
-            Ok(())
-        })();
-        match cleanup {
-            Ok(()) => {
-                self.stage_live = false;
-                Ok(())
-            }
-            Err(_) if note_is_visible => {
-                // The final note is already durable. Never turn a safe save into a
-                // reported failure merely because a concurrent actor changed the
-                // stage entry after we held its descriptor.
-                self.stage_live = false;
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
+        self.commit_inner()
     }
 
     pub fn abort(mut self) -> Result<(), VaultError> {
-        self.cleanup_stage()
+        if self.slot.journal.phase == JournalPhase::Preparing && !self.slot.is_quarantined() {
+            self.slot.reset_to_empty()
+        } else {
+            Ok(())
+        }
     }
 
     fn fault_before_first_attachment_rename(&self) -> bool {
@@ -1310,7 +1096,8 @@ impl VaultTransaction {
         ) {
             let visible = self
                 .canonical_destination
-                .join(&self.stage_name)
+                .join(workspace::WORKSPACE_NAME)
+                .join(format!("slot-{}", self.slot.index()))
                 .join(_temporary);
             let displaced = self
                 .canonical_destination
@@ -1397,46 +1184,22 @@ impl VaultTransaction {
         }
         Ok(())
     }
-
-    fn inject_stage_swap_before_detach(&self) -> Result<(), VaultError> {
-        #[cfg(test)]
-        if matches!(self.commit_fault, Some(CommitFault::SwapStageBeforeDetach)) {
-            let visible_stage = self.canonical_destination.join(&self.stage_name);
-            let displaced_stage = self
-                .canonical_destination
-                .join(".arthur-test-displaced-stage");
-            std::fs::rename(&visible_stage, &displaced_stage).map_err(|_| VaultError::Io)?;
-            std::fs::create_dir(&visible_stage).map_err(|_| VaultError::Io)?;
-        }
-        Ok(())
-    }
-
-    fn fault_stage_cleanup_after_note(&self) -> bool {
-        #[cfg(test)]
-        {
-            matches!(
-                self.commit_fault,
-                Some(CommitFault::StageCleanupFailureAfterNote)
-            )
-        }
-        #[cfg(not(test))]
-        false
-    }
 }
 
 impl Drop for VaultTransaction {
     fn drop(&mut self) {
-        let _ = self.cleanup_stage();
+        if self.slot.journal.phase == JournalPhase::Preparing && !self.slot.is_quarantined() {
+            let _ = self.slot.reset_to_empty();
+        }
     }
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum CommitFault {
     BeforeFirstAttachmentRename,
     BeforeNoteRename,
-    SwapStageBeforeDetach,
-    StageCleanupFailureAfterNote,
     BeforeSourceExchange,
     SourceExchangeSyncFailure,
     ReplaceSourceBeforeExchange,
@@ -1484,7 +1247,7 @@ mod tests {
     use super::*;
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -1641,7 +1404,7 @@ mod tests {
             b"test",
         )
         .unwrap();
-        let stage = destination.join(format!(".arthur-stage-{SESSION}"));
+        let stage = destination.join(workspace::WORKSPACE_NAME).join("slot-0");
         let mut transaction = Vault::open(&destination)
             .unwrap()
             .begin(save(&format!("arthur-media://{MEDIA_ID}")))
@@ -1664,25 +1427,7 @@ mod tests {
                 .starts_with("media-")
         }));
         assert!(!destination.join("Article.md").exists());
-        drop(Vault::open(&destination).unwrap());
-        let preserved_reaper = fs::read_dir(&destination)
-            .unwrap()
-            .filter_map(Result::ok)
-            .find(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".arthur-reap-")
-            })
-            .unwrap()
-            .path();
-        assert!(fs::read_dir(preserved_reaper).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with("media-")
-        }));
+        assert_eq!(fs::read(stage.join("media-0")).unwrap(), b"test");
         fs::remove_dir_all(destination).unwrap();
     }
 
@@ -1728,7 +1473,7 @@ mod tests {
             fs::create_dir(destination.join("attachments")).unwrap();
             let target = destination.join("attachments").join(&expected_name);
             fs::write(&target, b"test").unwrap();
-            let stage = destination.join(format!(".arthur-stage-{SESSION}"));
+            let stage = destination.join(workspace::WORKSPACE_NAME).join("slot-0");
             let mut transaction = Vault::open(&destination)
                 .unwrap()
                 .begin(save(&format!("arthur-media://{MEDIA_ID}")))
@@ -1748,6 +1493,7 @@ mod tests {
                     .to_string_lossy()
                     .starts_with("media-")
             }));
+            assert_eq!(fs::read(stage.join("media-0")).unwrap(), b"test");
             if file_type.is_symlink() {
                 assert_eq!(
                     fs::read(destination.join(".arthur-test-outside-attachment")).unwrap(),
@@ -1946,6 +1692,31 @@ mod tests {
     }
 
     #[test]
+    fn media_4097_is_rejected_before_creating_a_fixed_child() {
+        let destination = temp();
+        let mut transaction = Vault::open(&destination)
+            .unwrap()
+            .begin(save("body"))
+            .unwrap();
+        transaction.next_media = workspace::MAX_MEDIA_PER_SAVE;
+        let slot = destination.join(workspace::WORKSPACE_NAME).join("slot-0");
+        let before = fs::read_dir(&slot).unwrap().count();
+        assert_eq!(
+            transaction.begin_media(MediaSpec {
+                media_id: MEDIA_ID.to_owned(),
+                source: "https://cdn.example.test/limit.webp".to_owned(),
+                kind: MediaKind::Image,
+                content_type: "image/webp".to_owned(),
+                declared_bytes: None,
+            }),
+            Err(VaultError::MediaLimitExceeded)
+        );
+        assert_eq!(fs::read_dir(slot).unwrap().count(), before);
+        transaction.abort().unwrap();
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
     fn only_exact_registered_uuid_placeholders_are_rewritten() {
         let destination = temp();
         let markdown = format!(
@@ -1966,447 +1737,107 @@ mod tests {
         fs::remove_dir_all(destination).unwrap();
     }
 
+    fn write_old_article(destination: &Path) -> Vec<u8> {
+        let bytes =
+            b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold"
+                .to_vec();
+        fs::write(destination.join("Article.md"), &bytes).unwrap();
+        bytes
+    }
+
     #[test]
-    fn exchange_interruption_before_the_swap_recovers_the_prior_note() {
+    fn exchange_pending_before_swap_recovers_old_and_reuses_the_slot() {
         let destination = temp();
-        let original =
-            b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold";
-        fs::write(destination.join("Article.md"), original).unwrap();
+        let old = write_old_article(&destination);
         let transaction = Vault::open(&destination)
             .unwrap()
             .begin(save("new"))
             .unwrap();
-
         assert_eq!(
             transaction.commit_with_fault(CommitFault::BeforeSourceExchange),
             Err(VaultError::Io)
         );
+        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), old);
         let reopened = Vault::open(&destination).unwrap();
-        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), original);
-        assert!(fs::read_dir(&destination).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".arthur-reap-")
-        }));
-        drop(reopened);
+        let next = reopened.begin(save("after recovery")).unwrap();
+        next.abort().unwrap();
         fs::remove_dir_all(destination).unwrap();
     }
 
     #[test]
-    fn successful_overwrite_truncates_retained_duplicate_media_via_held_fd() {
+    fn exchange_pending_after_swap_recovers_the_durable_new_note() {
         let destination = temp();
-        fs::write(
-            destination.join("Article.md"),
-            "---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold",
-        )
-        .unwrap();
-        let attachment_name =
-            content_addressed_name("hero", &names::digest(b"test"), "webp").unwrap();
-        fs::create_dir(destination.join("attachments")).unwrap();
-        fs::write(
-            destination.join("attachments").join(&attachment_name),
-            b"test",
-        )
-        .unwrap();
-        let mut transaction = Vault::open(&destination)
-            .unwrap()
-            .begin(save(&format!("arthur-media://{MEDIA_ID}")))
-            .unwrap();
-        add_media(&mut transaction);
-
-        transaction.commit().unwrap();
-
-        let reaper = fs::read_dir(&destination)
-            .unwrap()
-            .filter_map(Result::ok)
-            .find(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".arthur-reap-")
-            })
-            .unwrap()
-            .path();
-        let retained_media = fs::read_dir(reaper)
-            .unwrap()
-            .filter_map(Result::ok)
-            .find(|entry| entry.file_name().to_string_lossy().starts_with("media-"))
-            .unwrap();
-        assert_eq!(retained_media.metadata().unwrap().len(), 0);
-        assert_eq!(
-            fs::read(destination.join("attachments").join(attachment_name)).unwrap(),
-            b"test"
-        );
-        fs::remove_dir_all(destination).unwrap();
-    }
-
-    #[test]
-    fn exchange_interruption_after_the_swap_recovers_the_new_note() {
-        let destination = temp();
-        fs::write(
-            destination.join("Article.md"),
-            "---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold",
-        )
-        .unwrap();
+        write_old_article(&destination);
         let transaction = Vault::open(&destination)
             .unwrap()
-            .begin(save("new"))
+            .begin(save("new body"))
             .unwrap();
-
         assert_eq!(
             transaction.commit_with_fault(CommitFault::AfterSourceExchange),
             Err(VaultError::Io)
         );
-        let reopened = Vault::open(&destination).unwrap();
-        assert_eq!(
-            fs::read_to_string(destination.join("Article.md")).unwrap(),
-            "---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nnew"
-        );
-        assert!(fs::read_dir(&destination).unwrap().any(|entry| {
-            entry
+        drop(Vault::open(&destination).unwrap());
+        assert!(
+            fs::read_to_string(destination.join("Article.md"))
                 .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".arthur-reap-")
-        }));
-        drop(reopened);
-        fs::remove_dir_all(destination).unwrap();
-    }
-
-    #[test]
-    fn source_exchange_sync_failure_preserves_the_journal_for_recovery() {
-        let destination = temp();
-        let stage = destination.join(format!(".arthur-stage-{SESSION}"));
-        fs::write(
-            destination.join("Article.md"),
-            "---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold",
-        )
-        .unwrap();
-        let transaction = Vault::open(&destination)
-            .unwrap()
-            .begin(save("new"))
-            .unwrap();
-
-        assert_eq!(
-            transaction.commit_with_fault(CommitFault::SourceExchangeSyncFailure),
-            Err(VaultError::Io)
-        );
-        assert!(stage.join(super::fs::EXCHANGE_JOURNAL).is_file());
-        assert!(stage.join("note-0").is_file());
-        let reopened = Vault::open(&destination).unwrap();
-        assert_eq!(
-            fs::read_to_string(destination.join("Article.md")).unwrap(),
-            "---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nnew"
-        );
-        assert!(fs::read_dir(&destination).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".arthur-reap-")
-        }));
-        drop(reopened);
-        fs::remove_dir_all(destination).unwrap();
-    }
-
-    #[test]
-    fn staged_note_swap_before_exchange_never_replaces_the_verified_old_note() {
-        let destination = temp();
-        let original =
-            b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold";
-        fs::write(destination.join("Article.md"), original).unwrap();
-        let transaction = Vault::open(&destination)
-            .unwrap()
-            .begin(save("new"))
-            .unwrap();
-
-        assert_eq!(
-            transaction.commit_with_fault(CommitFault::ReplaceStagedNoteBeforeExchange),
-            Err(VaultError::SourceConflict)
-        );
-        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), original);
-        assert_eq!(
-            fs::read(destination.join(".arthur-test-displaced-staged-note")).unwrap(),
-            b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nnew"
-        );
-        assert!(
-            destination
-                .join(format!(".arthur-stage-{SESSION}"))
-                .join(super::fs::EXCHANGE_JOURNAL)
-                .exists()
+                .contains("new body")
         );
         fs::remove_dir_all(destination).unwrap();
     }
 
     #[test]
-    fn post_exchange_target_removal_restores_verified_old_note_without_losing_new() {
+    fn source_substitution_restores_old_visibility_and_preserves_the_substitute() {
         let destination = temp();
-        let original =
-            b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold";
-        fs::write(destination.join("Article.md"), original).unwrap();
+        let old = write_old_article(&destination);
         let transaction = Vault::open(&destination)
             .unwrap()
             .begin(save("new"))
             .unwrap();
-
-        assert_eq!(
-            transaction.commit_with_fault(CommitFault::RemoveTargetAfterExchange),
-            Err(VaultError::SourceConflict)
-        );
-        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), original);
-        assert!(
-            destination
-                .join(".arthur-test-displaced-new-note")
-                .is_file()
-        );
-        assert!(
-            destination
-                .join(format!(".arthur-stage-{SESSION}"))
-                .join(super::fs::EXCHANGE_JOURNAL)
-                .exists()
-        );
-        fs::remove_dir_all(destination).unwrap();
-    }
-
-    #[test]
-    fn post_exchange_target_swap_restores_old_and_preserves_unknown_and_new_notes() {
-        let destination = temp();
-        let original =
-            b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold";
-        fs::write(destination.join("Article.md"), original).unwrap();
-        let stage = destination.join(format!(".arthur-stage-{SESSION}"));
-        let transaction = Vault::open(&destination)
-            .unwrap()
-            .begin(save("new"))
-            .unwrap();
-
-        assert_eq!(
-            transaction.commit_with_fault(CommitFault::ReplaceTargetAfterExchange),
-            Err(VaultError::SourceConflict)
-        );
-        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), original);
-        assert_eq!(
-            fs::read(destination.join(".arthur-test-displaced-new-note")).unwrap(),
-            b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nnew"
-        );
-        assert!(fs::read_dir(&stage).unwrap().any(|entry| {
-            let entry = entry.unwrap();
-            entry.file_name().to_string_lossy().starts_with("note-")
-                && fs::read(entry.path()).is_ok_and(|bytes| bytes == b"unrelated replacement")
-        }));
-        fs::remove_dir_all(destination).unwrap();
-    }
-
-    #[test]
-    fn source_replacement_race_returns_conflict_without_losing_any_note() {
-        let destination = temp();
-        let original =
-            b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold";
-        fs::write(destination.join("Article.md"), original).unwrap();
-        let stage = destination.join(format!(".arthur-stage-{SESSION}"));
-        let transaction = Vault::open(&destination)
-            .unwrap()
-            .begin(save("new"))
-            .unwrap();
-
         assert_eq!(
             transaction.commit_with_fault(CommitFault::ReplaceSourceBeforeExchange),
             Err(VaultError::SourceConflict)
         );
-        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), original);
+        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), old);
         assert_eq!(
-            fs::read(destination.join(".arthur-test-displaced-source-note")).unwrap(),
-            original
-        );
-        assert!(stage.join("note-0").is_file());
-        assert_eq!(
-            fs::read(stage.join("old-note-1")).unwrap(),
+            fs::read(
+                destination
+                    .join(workspace::WORKSPACE_NAME)
+                    .join("slot-0")
+                    .join(workspace::OLD_BACKUP)
+            )
+            .unwrap(),
             b"unrelated replacement"
         );
-        let journal = fs::read_to_string(stage.join(super::fs::EXCHANGE_JOURNAL)).unwrap();
-        assert!(!journal.contains("https://example.test/article"));
-        assert!(!journal.contains("\nnew"));
-
-        let reopened = Vault::open(&destination).unwrap();
-        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), original);
-        assert_eq!(
-            fs::read(destination.join(".arthur-test-displaced-source-note")).unwrap(),
-            original
-        );
-        assert!(fs::read_dir(&destination).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".arthur-reap-")
-        }));
-        drop(reopened);
         fs::remove_dir_all(destination).unwrap();
     }
 
     #[test]
-    fn source_symlink_race_never_follows_or_overwrites_its_target() {
+    fn source_symlink_substitution_is_preserved_without_following() {
         let destination = temp();
-        let outside_directory = temp();
-        let original =
-            b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold";
-        fs::write(destination.join("Article.md"), original).unwrap();
-        let stage = destination.join(format!(".arthur-stage-{SESSION}"));
-        let outside = outside_directory.join("source-target");
-        fs::write(&outside, b"outside replacement").unwrap();
+        let outside = destination.join("outside");
+        fs::write(&outside, b"outside").unwrap();
+        let old = write_old_article(&destination);
         let transaction = Vault::open(&destination)
             .unwrap()
             .begin(save("new"))
             .unwrap();
-
         assert_eq!(
             transaction.commit_with_source_symlink_fault(outside.clone()),
             Err(VaultError::SourceConflict)
         );
-        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), original);
-        assert_eq!(fs::read(&outside).unwrap(), b"outside replacement");
-        assert!(stage.join("old-note-1").is_symlink());
-        assert_eq!(
-            fs::read(destination.join(".arthur-test-displaced-source-note")).unwrap(),
-            original
-        );
-        assert!(stage.join(super::fs::EXCHANGE_JOURNAL).is_file());
-        assert!(stage.join("note-0").is_file());
-
-        let reopened = Vault::open(&destination).unwrap();
-        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), original);
-        assert_eq!(fs::read(&outside).unwrap(), b"outside replacement");
-        assert!(fs::read_dir(&destination).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".arthur-reap-")
-        }));
-        drop(reopened);
-        fs::remove_dir_all(destination).unwrap();
-        fs::remove_dir_all(outside_directory).unwrap();
-    }
-
-    #[test]
-    fn source_fifo_race_never_blocks_or_deletes_the_replacement() {
-        use std::os::unix::fs::FileTypeExt;
-
-        let destination = temp();
-        let original =
-            b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold";
-        fs::write(destination.join("Article.md"), original).unwrap();
-        let stage = destination.join(format!(".arthur-stage-{SESSION}"));
-        let transaction = Vault::open(&destination)
-            .unwrap()
-            .begin(save("new"))
-            .unwrap();
-
-        assert_eq!(
-            transaction.commit_with_fault(CommitFault::ReplaceSourceWithFifoBeforeExchange),
-            Err(VaultError::SourceConflict)
-        );
-        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), original);
+        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), old);
+        assert_eq!(fs::read(&outside).unwrap(), b"outside");
         assert!(
-            fs::symlink_metadata(stage.join("old-note-1"))
-                .unwrap()
-                .file_type()
-                .is_fifo()
-        );
-        assert_eq!(
-            fs::read(destination.join(".arthur-test-displaced-source-note")).unwrap(),
-            original
-        );
-        assert!(stage.join(super::fs::EXCHANGE_JOURNAL).is_file());
-        assert!(stage.join("note-0").is_file());
-
-        let reopened = Vault::open(&destination).unwrap();
-        assert_eq!(fs::read(destination.join("Article.md")).unwrap(), original);
-        assert!(fs::read_dir(&destination).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".arthur-reap-")
-        }));
-        drop(reopened);
-        fs::remove_dir_all(destination).unwrap();
-    }
-
-    #[test]
-    fn malformed_exchange_journal_is_preserved_for_manual_recovery() {
-        let destination = temp();
-        let stage = destination.join(format!(".arthur-stage-{SESSION}"));
-        fs::create_dir(&stage).unwrap();
-        fs::write(
-            stage.join(super::fs::STAGE_OWNER_MARKER),
-            format!("arthur-stage-owner-v1\n{SESSION}\n"),
-        )
-        .unwrap();
-        fs::write(stage.join("note-0"), b"staged note").unwrap();
-        fs::write(stage.join(super::fs::EXCHANGE_JOURNAL), b"{").unwrap();
-
-        let reopened = Vault::open(&destination).unwrap();
-        let reaper = fs::read_dir(&destination)
+            fs::symlink_metadata(
+                destination
+                    .join(workspace::WORKSPACE_NAME)
+                    .join("slot-0")
+                    .join(workspace::OLD_BACKUP)
+            )
             .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| {
-                path.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with(".arthur-reap-")
-            })
-            .unwrap();
-        assert_eq!(fs::read(reaper.join("note-0")).unwrap(), b"staged note");
-        assert_eq!(
-            fs::read(reaper.join(super::fs::EXCHANGE_JOURNAL)).unwrap(),
-            b"{"
+            .file_type()
+            .is_symlink()
         );
-        drop(reopened);
-        fs::remove_dir_all(destination).unwrap();
-    }
-
-    #[test]
-    fn cleanup_window_swap_does_not_remove_the_replacement_stage_directory() {
-        let destination = temp();
-        let visible_stage = destination.join(format!(".arthur-stage-{SESSION}"));
-        let displaced_stage = destination.join(".arthur-test-displaced-stage");
-        let transaction = Vault::open(&destination)
-            .unwrap()
-            .begin(save("body"))
-            .unwrap();
-
-        let saved = transaction
-            .commit_with_fault(CommitFault::SwapStageBeforeDetach)
-            .unwrap();
-        assert!(saved.display_path.exists());
-        assert!(visible_stage.is_dir());
-        assert!(displaced_stage.is_dir());
-        assert_eq!(fs::read_dir(displaced_stage).unwrap().count(), 1);
-
-        fs::remove_dir_all(destination).unwrap();
-    }
-
-    #[test]
-    fn post_note_cleanup_failure_is_deferred_without_reversing_the_save_result() {
-        let destination = temp();
-        let stage = destination.join(format!(".arthur-stage-{SESSION}"));
-        let transaction = Vault::open(&destination)
-            .unwrap()
-            .begin(save("body"))
-            .unwrap();
-
-        let saved = transaction
-            .commit_with_fault(CommitFault::StageCleanupFailureAfterNote)
-            .unwrap();
-        assert!(saved.display_path.exists());
-        assert!(stage.is_dir());
-
-        let reopened = Vault::open(&destination).unwrap();
-        assert!(!stage.exists());
-        drop(reopened);
         fs::remove_dir_all(destination).unwrap();
     }
 }

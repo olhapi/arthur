@@ -19,7 +19,13 @@ fn probe_is_writable_without_leaving_a_file() {
     let path = temp();
     let probe = Vault::probe(&path).unwrap();
     assert!(probe.writable);
-    assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+    let entries = fs::read_dir(&path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 2);
+    assert!(path.join("attachments").is_dir());
+    assert!(path.join(".arthur-workspace-v1").is_dir());
     fs::remove_dir_all(path).unwrap();
 }
 #[test]

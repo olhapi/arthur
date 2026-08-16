@@ -2,6 +2,7 @@ mod frontmatter;
 mod fs;
 mod names;
 mod transaction;
+mod workspace;
 
 pub use transaction::{MediaDisposition, MediaSpec, SaveSpec, SavedNote, VaultTransaction};
 
@@ -37,6 +38,7 @@ pub struct Vault {
     destination: OwnedFd,
     attachments: OwnedFd,
     canonical_destination: PathBuf,
+    workspace: workspace::Workspace,
 }
 impl Vault {
     pub fn open(destination: &Path) -> Result<Self, VaultError> {
@@ -50,12 +52,13 @@ impl Vault {
             return Err(VaultError::NotDirectory);
         }
         let destination = fs::open_destination(&canonical_destination)?;
-        transaction::remove_stale_stages(&destination)?;
         let attachments = fs::open_or_create_child_directory(&destination, "attachments")?;
+        let workspace = workspace::Workspace::open(&destination)?;
         Ok(Self {
             destination,
             attachments,
             canonical_destination,
+            workspace,
         })
     }
     pub fn probe(destination: &Path) -> Result<VaultProbe, VaultError> {

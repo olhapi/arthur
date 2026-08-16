@@ -257,13 +257,9 @@ fn abort_save_acknowledges_the_session_and_cleans_the_staged_transaction() {
         })),
         serde_json::json!({"type":"ack","requestId":"abort","sessionId":SESSION})
     );
-    assert!(fs::read_dir(&destination).unwrap().all(|entry| {
-        !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".arthur-stage-")
-    }));
+    let slot = destination.join(".arthur-workspace-v1/slot-0");
+    assert_eq!(fs::metadata(slot.join("new-note")).unwrap().len(), 0);
+    assert_eq!(fs::metadata(slot.join("old-backup")).unwrap().len(), 0);
     fs::remove_dir_all(destination).unwrap();
 }
 

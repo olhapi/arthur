@@ -9,12 +9,6 @@ use std::{
 
 static COUNT: AtomicU64 = AtomicU64::new(0);
 const SESSION: &str = "a5a74c85-92de-4a5d-9768-4e66c4d64987";
-const STALE_SESSION: &str = "b5a74c85-92de-4a5d-9768-4e66c4d64987";
-const REAPER_SESSION: &str = "c5a74c85-92de-4a5d-9768-4e66c4d64987";
-
-fn ownership_marker(session: &str) -> String {
-    format!("arthur-stage-owner-v1\n{session}\n")
-}
 
 fn media_id(label: &str) -> &'static str {
     match label {
@@ -83,6 +77,238 @@ fn attachment_bytes(path: &Path) -> BTreeMap<String, Vec<u8>> {
             )
         })
         .collect()
+}
+
+fn tree_metrics(path: &Path) -> (usize, u64) {
+    fn visit(path: &Path, entries: &mut usize, bytes: &mut u64) {
+        for entry in fs::read_dir(path).unwrap().map(Result::unwrap) {
+            *entries += 1;
+            let metadata = fs::symlink_metadata(entry.path()).unwrap();
+            if metadata.is_dir() {
+                visit(&entry.path(), entries, bytes);
+            } else if metadata.is_file() {
+                *bytes += metadata.len();
+            }
+        }
+    }
+    let mut entries = 0;
+    let mut bytes = 0;
+    visit(path, &mut entries, &mut bytes);
+    (entries, bytes)
+}
+
+#[test]
+fn repeated_overwrites_reuse_one_bounded_four_slot_workspace() {
+    let destination = temp();
+    let source = "https://example.test/article";
+    for body in ["first", "second", "third"] {
+        Vault::open(&destination)
+            .unwrap()
+            .begin(save_spec(source, "Article", body))
+            .unwrap()
+            .commit()
+            .unwrap();
+    }
+
+    let workspace = destination.join(".arthur-workspace-v1");
+    assert!(workspace.is_dir());
+    let children: Vec<_> = fs::read_dir(&workspace)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(children.len(), 5);
+    for index in 0..4 {
+        let slot = workspace.join(format!("slot-{index}"));
+        assert!(slot.join("owner").is_file());
+        assert!(slot.join("journal-a").is_file());
+        assert!(slot.join("journal-b").is_file());
+        assert!(slot.join("new-note").is_file());
+        assert!(slot.join("old-backup").is_file());
+    }
+    let first_metrics = tree_metrics(&workspace);
+
+    Vault::open(&destination)
+        .unwrap()
+        .begin(save_spec(source, "Article", "fourth"))
+        .unwrap()
+        .commit()
+        .unwrap();
+
+    assert_eq!(tree_metrics(&workspace), first_metrics);
+    fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
+fn four_wrong_slot_markers_quarantine_without_touching_substitutes() {
+    let destination = temp();
+    drop(Vault::open(&destination).unwrap());
+    let workspace = destination.join(".arthur-workspace-v1");
+    for index in 0..4 {
+        fs::write(workspace.join(format!("slot-{index}/owner")), b"substitute").unwrap();
+    }
+
+    assert!(matches!(
+        Vault::open(&destination),
+        Err(VaultError::UnsafeChild)
+    ));
+    for index in 0..4 {
+        assert_eq!(
+            fs::read(workspace.join(format!("slot-{index}/owner"))).unwrap(),
+            b"substitute"
+        );
+    }
+    fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
+fn partial_workspace_and_missing_fixed_children_fail_closed_without_cleanup() {
+    let partial = temp();
+    let workspace = partial.join(".arthur-workspace-v1");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(
+        workspace.join("owner"),
+        b"arthur-workspace-owner-v1\nslots=4\nmedia=4096\n",
+    )
+    .unwrap();
+    fs::create_dir(workspace.join("slot-0")).unwrap();
+    fs::write(workspace.join("slot-0/owner"), b"partial-slot").unwrap();
+    assert_eq!(Vault::open(&partial).err(), Some(VaultError::UnsafeChild));
+    assert_eq!(
+        fs::read(workspace.join("slot-0/owner")).unwrap(),
+        b"partial-slot"
+    );
+    fs::remove_dir_all(partial).unwrap();
+
+    let missing = temp();
+    drop(Vault::open(&missing).unwrap());
+    for index in 0..4 {
+        fs::remove_file(
+            missing
+                .join(".arthur-workspace-v1")
+                .join(format!("slot-{index}"))
+                .join("new-note"),
+        )
+        .unwrap();
+    }
+    assert_eq!(Vault::open(&missing).err(), Some(VaultError::UnsafeChild));
+    for index in 0..4 {
+        assert!(
+            !missing
+                .join(".arthur-workspace-v1")
+                .join(format!("slot-{index}"))
+                .join("new-note")
+                .exists()
+        );
+    }
+    fs::remove_dir_all(missing).unwrap();
+}
+
+#[test]
+fn slot_directory_swap_quarantines_without_touching_the_substitute() {
+    let destination = temp();
+    let transaction = Vault::open(&destination)
+        .unwrap()
+        .begin(save_spec("https://example.test/article", "Article", "body"))
+        .unwrap();
+    let workspace = destination.join(".arthur-workspace-v1");
+    let visible = workspace.join("slot-0");
+    let displaced = workspace.join("displaced-slot-0");
+    fs::rename(&visible, &displaced).unwrap();
+    fs::create_dir(&visible).unwrap();
+    fs::write(visible.join("unrelated"), b"substitute").unwrap();
+
+    assert_eq!(transaction.commit(), Err(VaultError::UnsafeChild));
+    assert_eq!(fs::read(visible.join("unrelated")).unwrap(), b"substitute");
+    assert!(displaced.join("new-note").is_file());
+    assert!(!destination.join("Article.md").exists());
+    fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
+fn late_marker_extra_and_fixed_hardlink_changes_fail_closed() {
+    use std::ffi::OsString;
+
+    let marker = temp();
+    let transaction = Vault::open(&marker)
+        .unwrap()
+        .begin(save_spec("https://example.test/marker", "Marker", "body"))
+        .unwrap();
+    let owner = marker.join(".arthur-workspace-v1/owner");
+    fs::write(&owner, b"unrelated marker").unwrap();
+    assert_eq!(transaction.commit(), Err(VaultError::UnsafeChild));
+    assert_eq!(fs::read(&owner).unwrap(), b"unrelated marker");
+    fs::remove_dir_all(marker).unwrap();
+
+    let extra = temp();
+    let transaction = Vault::open(&extra)
+        .unwrap()
+        .begin(save_spec("https://example.test/extra", "Extra", "body"))
+        .unwrap();
+    let slot = extra.join(".arthur-workspace-v1/slot-0");
+    let invalid = OsString::from("bad-\u{202e}");
+    fs::write(slot.join(&invalid), b"unrelated extra").unwrap();
+    assert_eq!(transaction.commit(), Err(VaultError::UnsafeChild));
+    assert_eq!(fs::read(slot.join(&invalid)).unwrap(), b"unrelated extra");
+    fs::remove_dir_all(extra).unwrap();
+
+    let linked = temp();
+    let transaction = Vault::open(&linked)
+        .unwrap()
+        .begin(save_spec("https://example.test/link", "Link", "body"))
+        .unwrap();
+    let fixed = linked.join(".arthur-workspace-v1/slot-0/new-note");
+    let alias = linked.join("fixed-alias");
+    fs::hard_link(&fixed, &alias).unwrap();
+    assert_eq!(transaction.commit(), Err(VaultError::UnsafeChild));
+    assert_eq!(fs::metadata(&alias).unwrap().len(), 0);
+    assert!(!linked.join("Link.md").exists());
+    fs::remove_dir_all(linked).unwrap();
+
+    let media = temp();
+    let mut transaction = Vault::open(&media)
+        .unwrap()
+        .begin(save_spec(
+            "https://example.test/media-link",
+            "Media Link",
+            &format!("arthur-media://{}", media_id("one")),
+        ))
+        .unwrap();
+    transaction
+        .begin_media(media_spec(
+            "one",
+            "https://cdn.example.test/media.webp",
+            MediaKind::Image,
+            "image/webp",
+            None,
+        ))
+        .unwrap();
+    let fixed = media.join(".arthur-workspace-v1/slot-0/media-0");
+    let alias = media.join("media-alias");
+    fs::hard_link(&fixed, &alias).unwrap();
+    assert_eq!(
+        transaction.append_chunk(media_id("one"), 0, b"must not write"),
+        Err(VaultError::UnsafeChild)
+    );
+    assert_eq!(fs::metadata(&alias).unwrap().len(), 0);
+    fs::remove_dir_all(media).unwrap();
+}
+
+#[test]
+fn hard_linked_existing_article_is_rejected_before_exchange() {
+    let destination = temp();
+    let article = destination.join("Article.md");
+    let alias = destination.join("Article alias.md");
+    let old = b"---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nold";
+    fs::write(&article, old).unwrap();
+    fs::hard_link(&article, &alias).unwrap();
+    let transaction = Vault::open(&destination)
+        .unwrap()
+        .begin(save_spec("https://example.test/article", "Article", "new"))
+        .unwrap();
+    assert_eq!(transaction.commit(), Err(VaultError::SourceConflict));
+    assert_eq!(fs::read(&article).unwrap(), old);
+    assert_eq!(fs::read(&alias).unwrap(), old);
+    fs::remove_dir_all(destination).unwrap();
 }
 
 #[test]
@@ -441,252 +667,6 @@ fn validates_completed_lengths_closed_media_and_declared_resource_budgets() {
         Err(VaultError::MediaLimitExceeded)
     );
     transaction.abort().unwrap();
-    fs::remove_dir_all(destination).unwrap();
-}
-
-#[test]
-fn abort_removes_all_staged_files_and_the_hidden_stage_directory() {
-    let destination = temp();
-    let mut transaction = Vault::open(&destination)
-        .unwrap()
-        .begin(save_spec(
-            "https://example.test/article",
-            "Abort",
-            &format!("arthur-media://{}", media_id("one")),
-        ))
-        .unwrap();
-    transaction
-        .begin_media(media_spec(
-            "one",
-            "https://cdn.example.test/one.webp",
-            MediaKind::Image,
-            "image/webp",
-            None,
-        ))
-        .unwrap();
-    transaction
-        .append_chunk(media_id("one"), 0, b"staged")
-        .unwrap();
-    transaction.abort().unwrap();
-    assert!(fs::read_dir(&destination).unwrap().all(|entry| {
-        !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".arthur-stage-")
-    }));
-    fs::remove_dir_all(destination).unwrap();
-}
-
-#[test]
-fn begins_with_a_synced_ownership_marker_before_any_staged_content() {
-    let destination = temp();
-    let stage = destination.join(format!(".arthur-stage-{SESSION}"));
-    let transaction = Vault::open(&destination)
-        .unwrap()
-        .begin(save_spec("https://example.test/article", "Marker", "body"))
-        .unwrap();
-
-    let entries: Vec<_> = fs::read_dir(&stage)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    assert_eq!(entries, vec![".arthur-stage-owner-v1"]);
-    assert_eq!(
-        fs::read_to_string(stage.join(".arthur-stage-owner-v1")).unwrap(),
-        ownership_marker(SESSION)
-    );
-
-    transaction.abort().unwrap();
-    fs::remove_dir_all(destination).unwrap();
-}
-
-#[test]
-fn destination_lock_prevents_live_stage_reclamation_and_releases_after_drop() {
-    let destination = temp();
-    {
-        let first = Vault::open(&destination)
-            .unwrap()
-            .begin(save_spec("https://example.test/one", "First", "body"))
-            .unwrap();
-        assert_eq!(Vault::open(&destination).err(), Some(VaultError::Busy));
-        assert!(fs::read_dir(&destination).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".arthur-stage-")
-        }));
-        drop(first);
-    }
-    let unlocked = Vault::open(&destination).unwrap();
-    drop(unlocked);
-
-    let unverified = destination.join(".arthur-stage-d5a74c85-92de-4a5d-9768-4e66c4d64988");
-    fs::create_dir(&unverified).unwrap();
-    fs::write(unverified.join("unrelated"), b"preserve").unwrap();
-    let verified = destination.join(format!(".arthur-stage-{STALE_SESSION}"));
-    fs::create_dir(&verified).unwrap();
-    fs::write(
-        verified.join(".arthur-stage-owner-v1"),
-        ownership_marker(STALE_SESSION),
-    )
-    .unwrap();
-    fs::write(verified.join("media-0"), b"stale").unwrap();
-    let reopened = Vault::open(&destination).unwrap();
-    assert!(unverified.is_dir());
-    assert_eq!(fs::read(unverified.join("unrelated")).unwrap(), b"preserve");
-    assert!(!verified.exists());
-    drop(reopened);
-    fs::remove_dir_all(destination).unwrap();
-}
-
-#[test]
-fn startup_reclaims_only_marker_verified_stages_and_preserves_unverified_content() {
-    let destination = temp();
-    let outside = temp();
-    let interrupted_reaper = destination.join(".arthur-reap-0123456789abcdef0123456789abcdef");
-    let stale_file = destination.join(".arthur-stage-a5a74c85-92de-4a5d-9768-4e66c4d64989");
-    let stale_link = destination.join(".arthur-stage-a5a74c85-92de-4a5d-9768-4e66c4d6498a");
-    let invalid_marker = destination.join(".arthur-stage-a5a74c85-92de-4a5d-9768-4e66c4d6498b");
-    let marker_symlink = destination.join(".arthur-stage-a5a74c85-92de-4a5d-9768-4e66c4d6498c");
-    let verified_stage = destination.join(format!(".arthur-stage-{STALE_SESSION}"));
-    let verified_reaper = destination.join(".arthur-reap-abcdef0123456789abcdef0123456789");
-    fs::create_dir(&interrupted_reaper).unwrap();
-    fs::write(interrupted_reaper.join("unrelated"), b"preserve").unwrap();
-    fs::write(&stale_file, b"preserve").unwrap();
-    std::os::unix::fs::symlink(&outside, &stale_link).unwrap();
-    fs::create_dir(&invalid_marker).unwrap();
-    fs::write(invalid_marker.join(".arthur-stage-owner-v1"), b"not Arthur").unwrap();
-    fs::write(invalid_marker.join("unrelated"), b"preserve").unwrap();
-    fs::write(outside.join("marker"), b"outside marker").unwrap();
-    fs::create_dir(&marker_symlink).unwrap();
-    std::os::unix::fs::symlink(
-        outside.join("marker"),
-        marker_symlink.join(".arthur-stage-owner-v1"),
-    )
-    .unwrap();
-    fs::write(marker_symlink.join("unrelated"), b"preserve").unwrap();
-    fs::create_dir(&verified_stage).unwrap();
-    fs::write(
-        verified_stage.join(".arthur-stage-owner-v1"),
-        ownership_marker(STALE_SESSION),
-    )
-    .unwrap();
-    fs::write(verified_stage.join("media-0"), b"stale").unwrap();
-    fs::create_dir(&verified_reaper).unwrap();
-    fs::write(
-        verified_reaper.join(".arthur-stage-owner-v1"),
-        ownership_marker(REAPER_SESSION),
-    )
-    .unwrap();
-    fs::write(verified_reaper.join("note-0"), b"stale").unwrap();
-
-    let reopened = Vault::open(&destination).unwrap();
-    assert_eq!(
-        fs::read(interrupted_reaper.join("unrelated")).unwrap(),
-        b"preserve"
-    );
-    assert_eq!(fs::read(&stale_file).unwrap(), b"preserve");
-    assert!(stale_link.is_symlink());
-    assert_eq!(
-        fs::read(invalid_marker.join("unrelated")).unwrap(),
-        b"preserve"
-    );
-    assert_eq!(
-        fs::read(marker_symlink.join("unrelated")).unwrap(),
-        b"preserve"
-    );
-    assert_eq!(fs::read(outside.join("marker")).unwrap(), b"outside marker");
-    assert!(!verified_stage.exists());
-    assert!(!verified_reaper.exists());
-    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
-    drop(reopened);
-
-    fs::remove_dir_all(destination).unwrap();
-    fs::remove_dir_all(outside).unwrap();
-}
-
-#[test]
-fn uppercase_max_uuid_stage_is_not_classified_as_arthur_owned() {
-    let destination = temp();
-    let unrelated = destination.join(".arthur-stage-FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF");
-    fs::create_dir(&unrelated).unwrap();
-    fs::write(
-        unrelated.join(".arthur-stage-owner-v1"),
-        ownership_marker("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"),
-    )
-    .unwrap();
-    fs::write(unrelated.join("unrelated"), b"preserve").unwrap();
-
-    drop(Vault::open(&destination).unwrap());
-
-    assert_eq!(fs::read(unrelated.join("unrelated")).unwrap(), b"preserve");
-    fs::remove_dir_all(destination).unwrap();
-}
-
-#[test]
-fn stage_cleanup_never_removes_a_replacement_directory_after_the_note_is_visible() {
-    let destination = temp();
-    let visible_stage = destination.join(format!(".arthur-stage-{SESSION}"));
-    let displaced_stage = destination.join("displaced-stage");
-    let transaction = Vault::open(&destination)
-        .unwrap()
-        .begin(save_spec(
-            "https://example.test/article",
-            "Stage Swap",
-            "body",
-        ))
-        .unwrap();
-
-    fs::rename(&visible_stage, &displaced_stage).unwrap();
-    fs::create_dir(&visible_stage).unwrap();
-
-    let saved = transaction.commit().unwrap();
-    assert!(saved.display_path.exists());
-    assert!(
-        visible_stage.is_dir(),
-        "cleanup must not remove a directory substituted at the stage path"
-    );
-    assert!(
-        displaced_stage.is_dir(),
-        "the descriptor-owned stage may have been moved, but it must be emptied safely"
-    );
-    assert_eq!(
-        fs::read_to_string(displaced_stage.join(".arthur-stage-owner-v1")).unwrap(),
-        ownership_marker(SESSION)
-    );
-    assert_eq!(fs::read_dir(&displaced_stage).unwrap().count(), 1);
-
-    fs::remove_dir_all(destination).unwrap();
-}
-
-#[test]
-fn abort_never_removes_a_replacement_directory_at_the_stage_path() {
-    let destination = temp();
-    let visible_stage = destination.join(format!(".arthur-stage-{SESSION}"));
-    let displaced_stage = destination.join("displaced-stage");
-    let transaction = Vault::open(&destination)
-        .unwrap()
-        .begin(save_spec(
-            "https://example.test/article",
-            "Stage Abort",
-            "body",
-        ))
-        .unwrap();
-
-    fs::rename(&visible_stage, &displaced_stage).unwrap();
-    fs::create_dir(&visible_stage).unwrap();
-
-    transaction.abort().unwrap();
-    assert!(visible_stage.is_dir());
-    assert!(displaced_stage.is_dir());
-    assert_eq!(
-        fs::read_to_string(displaced_stage.join(".arthur-stage-owner-v1")).unwrap(),
-        ownership_marker(SESSION)
-    );
-    assert_eq!(fs::read_dir(&displaced_stage).unwrap().count(), 1);
-
     fs::remove_dir_all(destination).unwrap();
 }
 

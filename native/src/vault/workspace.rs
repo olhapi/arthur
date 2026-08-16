@@ -1,0 +1,1042 @@
+use super::{VaultError, fs, names::validate_basename};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    os::fd::OwnedFd,
+};
+
+pub(super) const WORKSPACE_NAME: &str = ".arthur-workspace-v1";
+pub(super) const SLOT_COUNT: usize = 4;
+pub(super) const MAX_MEDIA_PER_SAVE: usize = 4096;
+const WORKSPACE_OWNER: &str = "owner";
+const JOURNAL_A: &str = "journal-a";
+const JOURNAL_B: &str = "journal-b";
+pub(super) const NEW_NOTE: &str = "new-note";
+pub(super) const OLD_BACKUP: &str = "old-backup";
+const MAX_JOURNAL_BYTES: usize = 1024 * 1024;
+const WORKSPACE_MARKER: &[u8] = b"arthur-workspace-owner-v1\nslots=4\nmedia=4096\n";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum JournalPhase {
+    Empty,
+    Preparing,
+    ExchangePending,
+    Committed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct JournalPayload {
+    version: u8,
+    pub generation: u64,
+    pub phase: JournalPhase,
+    pub target: Option<String>,
+    pub old: Option<fs::FileFingerprint>,
+    pub backup: Option<fs::FileFingerprint>,
+    pub new: Option<fs::FileFingerprint>,
+    owner: fs::FileIdentity,
+    journal_a: fs::FileIdentity,
+    journal_b: fs::FileIdentity,
+    pub new_note: fs::FileIdentity,
+    pub old_backup: fs::FileIdentity,
+    pub media: BTreeMap<usize, fs::FileIdentity>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalEnvelope {
+    payload: JournalPayload,
+    checksum: String,
+}
+
+pub(super) struct Slot {
+    index: usize,
+    root: OwnedFd,
+    workspace: OwnedFd,
+    workspace_owner: File,
+    pub directory: OwnedFd,
+    owner: File,
+    journal_a: File,
+    journal_b: File,
+    pub new_note: File,
+    pub old_backup: File,
+    pub media: BTreeMap<usize, File>,
+    pub journal: JournalPayload,
+    quarantined: bool,
+    new_note_recreated: bool,
+}
+
+pub(super) struct Workspace {
+    slots: Vec<Slot>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoteState {
+    Missing,
+    Old,
+    Backup,
+    New,
+    Unknown,
+}
+
+fn note_state(
+    directory: &OwnedFd,
+    name: &str,
+    old: Option<&fs::FileFingerprint>,
+    backup: Option<&fs::FileFingerprint>,
+    new: &fs::FileFingerprint,
+) -> NoteState {
+    if old.is_some_and(|value| {
+        fs::regular_file_matches_fingerprint(directory, name, value).unwrap_or(false)
+    }) {
+        NoteState::Old
+    } else if backup.is_some_and(|value| {
+        fs::regular_file_matches_fingerprint(directory, name, value).unwrap_or(false)
+    }) {
+        NoteState::Backup
+    } else if fs::regular_file_matches_fingerprint(directory, name, new).unwrap_or(false) {
+        NoteState::New
+    } else if fs::child_exists(directory, name).is_ok_and(|exists| !exists) {
+        NoteState::Missing
+    } else {
+        NoteState::Unknown
+    }
+}
+
+fn slot_name(index: usize) -> String {
+    format!("slot-{index}")
+}
+
+fn slot_marker(index: usize) -> Vec<u8> {
+    format!("arthur-slot-owner-v1\nslot={index}\n").into_bytes()
+}
+
+fn media_name(index: usize) -> String {
+    format!("media-{index}")
+}
+
+fn checksum(payload: &JournalPayload) -> Result<String, VaultError> {
+    let bytes = serde_json::to_vec(payload).map_err(|_| VaultError::Io)?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn encode_journal(payload: JournalPayload) -> Result<Vec<u8>, VaultError> {
+    let checksum = checksum(&payload)?;
+    let bytes =
+        serde_json::to_vec(&JournalEnvelope { payload, checksum }).map_err(|_| VaultError::Io)?;
+    if bytes.len() > MAX_JOURNAL_BYTES {
+        return Err(VaultError::MediaLimitExceeded);
+    }
+    Ok(bytes)
+}
+
+fn decode_journal(file: &mut File) -> Option<JournalPayload> {
+    let bytes = fs::read_open_file_prefix(file, MAX_JOURNAL_BYTES + 1).ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_JOURNAL_BYTES {
+        return None;
+    }
+    let envelope: JournalEnvelope = serde_json::from_slice(&bytes).ok()?;
+    if envelope.checksum.len() != 64 || checksum(&envelope.payload).ok()? != envelope.checksum {
+        return None;
+    }
+    let canonical = encode_journal(envelope.payload.clone()).ok()?;
+    if canonical != bytes {
+        return None;
+    }
+    Some(envelope.payload)
+}
+
+fn valid_journal_semantics(payload: &JournalPayload) -> bool {
+    payload.version == 1
+        && !payload.generation.eq(&u64::MAX)
+        && payload
+            .target
+            .as_deref()
+            .is_none_or(|target| validate_basename(target).is_ok() && target.ends_with(".md"))
+        && payload.media.len() <= MAX_MEDIA_PER_SAVE
+        && payload
+            .media
+            .keys()
+            .all(|index| *index < MAX_MEDIA_PER_SAVE)
+        && payload.old.as_ref().is_none_or(valid_fingerprint)
+        && payload.backup.as_ref().is_none_or(valid_fingerprint)
+        && payload.new.as_ref().is_none_or(valid_fingerprint)
+        && match payload.phase {
+            JournalPhase::Empty | JournalPhase::Preparing => {
+                payload.target.is_none()
+                    && payload.old.is_none()
+                    && payload.backup.is_none()
+                    && payload.new.is_none()
+            }
+            JournalPhase::ExchangePending | JournalPhase::Committed => {
+                payload.target.is_some()
+                    && payload.new.is_some()
+                    && (payload.old.is_some() == payload.backup.is_some())
+            }
+        }
+}
+
+fn create_fixed_file(directory: &OwnedFd, name: &str, bytes: &[u8]) -> Result<File, VaultError> {
+    let mut file = fs::create_exclusive_file(directory, name)?;
+    fs::reset_file(&mut file, bytes)?;
+    fs::sync_owned_directory(directory)?;
+    Ok(file)
+}
+
+fn read_exact_marker(file: &mut File, expected: &[u8]) -> bool {
+    fs::read_open_file_prefix(file, expected.len() + 1).is_ok_and(|bytes| bytes == expected)
+}
+
+fn held_marker_matches(file: &File, expected: &[u8]) -> bool {
+    file.try_clone()
+        .ok()
+        .is_some_and(|mut clone| read_exact_marker(&mut clone, expected))
+}
+
+fn valid_fingerprint(value: &fs::FileFingerprint) -> bool {
+    value.sha256.len() == 64
+        && value
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fixed_payload(
+    generation: u64,
+    phase: JournalPhase,
+    target: Option<String>,
+    old: Option<fs::FileFingerprint>,
+    backup: Option<fs::FileFingerprint>,
+    new: Option<fs::FileFingerprint>,
+    owner: &File,
+    journal_a: &File,
+    journal_b: &File,
+    new_note: &File,
+    old_backup: &File,
+    media: &BTreeMap<usize, File>,
+) -> Result<JournalPayload, VaultError> {
+    Ok(JournalPayload {
+        version: 1,
+        generation,
+        phase,
+        target,
+        old,
+        backup,
+        new,
+        owner: fs::identity_open_regular_file(owner)?,
+        journal_a: fs::identity_open_regular_file(journal_a)?,
+        journal_b: fs::identity_open_regular_file(journal_b)?,
+        new_note: fs::identity_open_regular_file(new_note)?,
+        old_backup: fs::identity_open_regular_file(old_backup)?,
+        media: media
+            .iter()
+            .map(|(index, file)| Ok((*index, fs::identity_open_regular_file(file)?)))
+            .collect::<Result<_, VaultError>>()?,
+    })
+}
+
+fn initialize_slot(
+    root: &OwnedFd,
+    workspace: &OwnedFd,
+    workspace_owner: &File,
+    index: usize,
+) -> Result<Slot, VaultError> {
+    let (directory, created) =
+        fs::open_or_create_persistent_child_directory(workspace, &slot_name(index))?;
+    if !created {
+        return Err(VaultError::UnsafeChild);
+    }
+    let owner = create_fixed_file(&directory, WORKSPACE_OWNER, &slot_marker(index))?;
+    let mut journal_a = create_fixed_file(&directory, JOURNAL_A, b"")?;
+    let mut journal_b = create_fixed_file(&directory, JOURNAL_B, b"")?;
+    let new_note = create_fixed_file(&directory, NEW_NOTE, b"")?;
+    let old_backup = create_fixed_file(&directory, OLD_BACKUP, b"")?;
+    let media = BTreeMap::new();
+    let first = fixed_payload(
+        0,
+        JournalPhase::Empty,
+        None,
+        None,
+        None,
+        None,
+        &owner,
+        &journal_a,
+        &journal_b,
+        &new_note,
+        &old_backup,
+        &media,
+    )?;
+    fs::reset_file(&mut journal_a, &encode_journal(first)?)?;
+    let journal = fixed_payload(
+        1,
+        JournalPhase::Empty,
+        None,
+        None,
+        None,
+        None,
+        &owner,
+        &journal_a,
+        &journal_b,
+        &new_note,
+        &old_backup,
+        &media,
+    )?;
+    fs::reset_file(&mut journal_b, &encode_journal(journal.clone())?)?;
+    Ok(Slot {
+        index,
+        root: root.try_clone().map_err(|_| VaultError::Io)?,
+        workspace: workspace.try_clone().map_err(|_| VaultError::Io)?,
+        workspace_owner: workspace_owner.try_clone().map_err(|_| VaultError::Io)?,
+        directory,
+        owner,
+        journal_a,
+        journal_b,
+        new_note,
+        old_backup,
+        media,
+        journal,
+        quarantined: false,
+        new_note_recreated: false,
+    })
+}
+
+fn open_slot(
+    workspace: &OwnedFd,
+    workspace_owner: &File,
+    destination: &OwnedFd,
+    index: usize,
+) -> Result<Slot, VaultError> {
+    let directory = fs::open_child_directory(workspace, &slot_name(index))?;
+    let children = fs::direct_children_strict(&directory)?;
+    if children.iter().any(|name| {
+        !matches!(
+            name.as_str(),
+            WORKSPACE_OWNER | JOURNAL_A | JOURNAL_B | NEW_NOTE | OLD_BACKUP
+        ) && !name.strip_prefix("media-").is_some_and(|suffix| {
+            suffix
+                .parse::<usize>()
+                .is_ok_and(|index| index < MAX_MEDIA_PER_SAVE && suffix == index.to_string())
+        })
+    }) {
+        return Err(VaultError::UnsafeChild);
+    }
+    let mut owner = fs::open_regular_file(&directory, WORKSPACE_OWNER)?;
+    if !read_exact_marker(&mut owner, &slot_marker(index)) {
+        return Err(VaultError::UnsafeChild);
+    }
+    let mut journal_a = fs::open_regular_file_for_update(&directory, JOURNAL_A)?;
+    let mut journal_b = fs::open_regular_file_for_update(&directory, JOURNAL_B)?;
+    let decoded_a = decode_journal(&mut journal_a);
+    let decoded_b = decode_journal(&mut journal_b);
+    let valid = [decoded_a, decoded_b]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(copy, journal)| journal.map(|journal| (copy, journal)))
+        .collect::<Vec<_>>();
+    if valid.is_empty()
+        || valid
+            .iter()
+            .any(|(copy, journal)| journal.generation % 2 != *copy as u64)
+        || valid
+            .iter()
+            .any(|(_, journal)| !valid_journal_semantics(journal))
+        || (valid.len() == 2 && valid[0].1.generation.abs_diff(valid[1].1.generation) != 1)
+    {
+        return Err(VaultError::UnsafeChild);
+    }
+    let journal = valid
+        .into_iter()
+        .map(|(_, journal)| journal)
+        .max_by_key(|journal| journal.generation)
+        .ok_or(VaultError::UnsafeChild)?;
+    let (new_note, new_note_recreated) =
+        match fs::open_regular_file_for_update(&directory, NEW_NOTE) {
+            Ok(file) => (file, false),
+            Err(_) if journal.phase == JournalPhase::ExchangePending => {
+                (create_fixed_file(&directory, NEW_NOTE, b"")?, true)
+            }
+            Err(error) => return Err(error),
+        };
+    let old_backup = fs::open_regular_file_for_update(&directory, OLD_BACKUP)?;
+    let mut media = BTreeMap::new();
+    for name in children {
+        if let Some(suffix) = name.strip_prefix("media-") {
+            let media_index = suffix
+                .parse::<usize>()
+                .map_err(|_| VaultError::UnsafeChild)?;
+            media.insert(
+                media_index,
+                fs::open_regular_file_for_update(&directory, &name)?,
+            );
+        }
+    }
+    let current = fixed_payload(
+        journal.generation,
+        journal.phase,
+        journal.target.clone(),
+        journal.old.clone(),
+        journal.backup.clone(),
+        journal.new.clone(),
+        &owner,
+        &journal_a,
+        &journal_b,
+        &new_note,
+        &old_backup,
+        &media,
+    )?;
+    if journal.owner != current.owner
+        || journal.journal_a != current.journal_a
+        || journal.journal_b != current.journal_b
+        || journal.old_backup != current.old_backup
+        || journal.media != current.media
+        || (matches!(
+            journal.phase,
+            JournalPhase::Empty | JournalPhase::Preparing | JournalPhase::Committed
+        ) && journal.new_note != current.new_note)
+    {
+        return Err(VaultError::UnsafeChild);
+    }
+    let mut slot = Slot {
+        index,
+        root: destination.try_clone().map_err(|_| VaultError::Io)?,
+        workspace: workspace.try_clone().map_err(|_| VaultError::Io)?,
+        workspace_owner: workspace_owner.try_clone().map_err(|_| VaultError::Io)?,
+        directory,
+        owner,
+        journal_a,
+        journal_b,
+        new_note,
+        old_backup,
+        media,
+        journal,
+        quarantined: false,
+        new_note_recreated,
+    };
+    slot.recover(destination)?;
+    Ok(slot)
+}
+
+impl Workspace {
+    pub(super) fn open(destination: &OwnedFd) -> Result<Self, VaultError> {
+        let exists = fs::child_exists(destination, WORKSPACE_NAME)?;
+        let (directory, created) =
+            fs::open_or_create_persistent_child_directory(destination, WORKSPACE_NAME)?;
+        if exists && created {
+            return Err(VaultError::UnsafeChild);
+        }
+        if created {
+            let owner = create_fixed_file(&directory, WORKSPACE_OWNER, WORKSPACE_MARKER)?;
+            fs::sync_owned_directory(&directory)?;
+            let mut slots = Vec::with_capacity(SLOT_COUNT);
+            for index in 0..SLOT_COUNT {
+                slots.push(initialize_slot(destination, &directory, &owner, index)?);
+            }
+            fs::sync_owned_directory(&directory)?;
+            return Ok(Self { slots });
+        }
+        let children = fs::direct_children_strict(&directory)?;
+        if !children.iter().any(|name| name == WORKSPACE_OWNER)
+            || children.iter().any(|name| {
+                name != WORKSPACE_OWNER && !(0..SLOT_COUNT).any(|index| name == &slot_name(index))
+            })
+        {
+            return Err(VaultError::UnsafeChild);
+        }
+        let mut owner = fs::open_regular_file(&directory, WORKSPACE_OWNER)?;
+        if !read_exact_marker(&mut owner, WORKSPACE_MARKER) {
+            return Err(VaultError::UnsafeChild);
+        }
+        let slots = (0..SLOT_COUNT)
+            .filter_map(|index| open_slot(&directory, &owner, destination, index).ok())
+            .collect::<Vec<_>>();
+        if slots.is_empty() {
+            return Err(VaultError::UnsafeChild);
+        }
+        Ok(Self { slots })
+    }
+
+    pub(super) fn claim(mut self) -> Result<Slot, VaultError> {
+        self.slots
+            .drain(..)
+            .find(|slot| slot.journal.phase == JournalPhase::Empty && !slot.quarantined)
+            .ok_or(VaultError::UnsafeChild)
+    }
+}
+
+impl Slot {
+    fn current_layout_is_exact(&self) -> Result<bool, VaultError> {
+        let top = fs::direct_children_strict(&self.workspace)?;
+        if !top.iter().any(|name| name == WORKSPACE_OWNER)
+            || !top.iter().any(|name| name == &slot_name(self.index))
+            || top.iter().any(|name| {
+                name != WORKSPACE_OWNER && !(0..SLOT_COUNT).any(|index| name == &slot_name(index))
+            })
+        {
+            return Ok(false);
+        }
+        let actual = fs::direct_children_strict(&self.directory)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut expected = [WORKSPACE_OWNER, JOURNAL_A, JOURNAL_B, NEW_NOTE, OLD_BACKUP]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        expected.extend(self.media.keys().map(|index| media_name(*index)));
+        Ok(actual == expected)
+    }
+
+    fn recover(&mut self, destination: &OwnedFd) -> Result<(), VaultError> {
+        match self.journal.phase {
+            JournalPhase::Empty => {
+                if !self.verify_fixed_paths()? {
+                    return Err(VaultError::UnsafeChild);
+                }
+                Ok(())
+            }
+            JournalPhase::Preparing => self.reset_to_empty(),
+            JournalPhase::ExchangePending => self.recover_exchange(destination),
+            JournalPhase::Committed => {
+                let target = self
+                    .journal
+                    .target
+                    .as_deref()
+                    .ok_or(VaultError::UnsafeChild)?;
+                let new = self.journal.new.as_ref().ok_or(VaultError::UnsafeChild)?;
+                if note_state(
+                    destination,
+                    target,
+                    self.journal.old.as_ref(),
+                    self.journal.backup.as_ref(),
+                    new,
+                ) != NoteState::New
+                    || !self.verify_fixed_paths()?
+                {
+                    self.quarantine();
+                    return Err(VaultError::UnsafeChild);
+                }
+                fs::sync_owned_directory(destination)?;
+                self.reset_to_empty()
+            }
+        }
+    }
+
+    fn recover_exchange(&mut self, destination: &OwnedFd) -> Result<(), VaultError> {
+        let target = self.journal.target.clone().ok_or(VaultError::UnsafeChild)?;
+        let new = self.journal.new.clone().ok_or(VaultError::UnsafeChild)?;
+        let old = self.journal.old.clone();
+        let backup = self.journal.backup.clone();
+        let target_state = note_state(destination, &target, old.as_ref(), backup.as_ref(), &new);
+        let staged_state = note_state(
+            &self.directory,
+            NEW_NOTE,
+            old.as_ref(),
+            backup.as_ref(),
+            &new,
+        );
+        if old.is_none() {
+            return match (target_state, staged_state) {
+                (NoteState::Missing, NoteState::New) => self.reset_to_empty(),
+                (NoteState::New, NoteState::Unknown) if self.new_note_recreated => {
+                    fs::sync_owned_directory(destination)?;
+                    self.persist(JournalPhase::Committed, Some(target), None, None, Some(new))?;
+                    self.reset_to_empty()
+                }
+                _ => {
+                    self.quarantine();
+                    Err(VaultError::UnsafeChild)
+                }
+            };
+        }
+        let old = old.ok_or(VaultError::UnsafeChild)?;
+        let backup = backup.ok_or(VaultError::UnsafeChild)?;
+        let backup_state = note_state(&self.directory, OLD_BACKUP, Some(&old), Some(&backup), &new);
+        match (target_state, staged_state, backup_state) {
+            (NoteState::Old, NoteState::New, NoteState::Backup) => self.reset_to_empty(),
+            (NoteState::New, NoteState::Old, NoteState::Backup) => {
+                fs::sync_owned_directory(destination)?;
+                self.reopen_new_note(&old)?;
+                self.persist(
+                    JournalPhase::Committed,
+                    Some(target),
+                    Some(old),
+                    Some(backup),
+                    Some(new),
+                )?;
+                self.reset_to_empty()
+            }
+            (NoteState::Missing, _, NoteState::Backup) => {
+                fs::rename_no_replace_between(&self.directory, OLD_BACKUP, destination, &target)?;
+                fs::sync_owned_directory(destination)?;
+                self.quarantine();
+                Err(VaultError::UnsafeChild)
+            }
+            (NoteState::Unknown, _, NoteState::Backup) => {
+                fs::rename_exchange_between(&self.directory, OLD_BACKUP, destination, &target)?;
+                fs::sync_owned_directory(&self.directory)?;
+                fs::sync_owned_directory(destination)?;
+                self.quarantine();
+                Err(VaultError::UnsafeChild)
+            }
+            _ => {
+                self.quarantine();
+                Err(VaultError::UnsafeChild)
+            }
+        }
+    }
+
+    pub(super) fn fixed_media_name(index: usize) -> Result<String, VaultError> {
+        if index >= MAX_MEDIA_PER_SAVE {
+            return Err(VaultError::MediaLimitExceeded);
+        }
+        Ok(media_name(index))
+    }
+
+    pub(super) fn persist(
+        &mut self,
+        phase: JournalPhase,
+        target: Option<String>,
+        old: Option<fs::FileFingerprint>,
+        backup: Option<fs::FileFingerprint>,
+        new: Option<fs::FileFingerprint>,
+    ) -> Result<(), VaultError> {
+        if self.quarantined {
+            return Err(VaultError::UnsafeChild);
+        }
+        if !self.verify_fixed_paths()? {
+            self.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        let generation = self
+            .journal
+            .generation
+            .checked_add(1)
+            .ok_or(VaultError::Io)?;
+        let payload = fixed_payload(
+            generation,
+            phase,
+            target,
+            old,
+            backup,
+            new,
+            &self.owner,
+            &self.journal_a,
+            &self.journal_b,
+            &self.new_note,
+            &self.old_backup,
+            &self.media,
+        )?;
+        let bytes = encode_journal(payload.clone())?;
+        let journal_file = if generation % 2 == 0 {
+            &mut self.journal_a
+        } else {
+            &mut self.journal_b
+        };
+        fs::reset_file(journal_file, &bytes)?;
+        fs::sync_owned_directory(&self.directory)?;
+        self.journal = payload;
+        Ok(())
+    }
+
+    pub(super) fn verify_fixed_paths(&self) -> Result<bool, VaultError> {
+        Ok(self.current_layout_is_exact()?
+            && fs::child_directory_matches(&self.root, WORKSPACE_NAME, &self.workspace)?
+            && fs::regular_path_matches_open_file(
+                &self.workspace,
+                WORKSPACE_OWNER,
+                &self.workspace_owner,
+            )?
+            && held_marker_matches(&self.workspace_owner, WORKSPACE_MARKER)
+            && fs::child_directory_matches(
+                &self.workspace,
+                &slot_name(self.index),
+                &self.directory,
+            )?
+            && fs::regular_path_matches_open_file(&self.directory, WORKSPACE_OWNER, &self.owner)?
+            && held_marker_matches(&self.owner, &slot_marker(self.index))
+            && fs::regular_path_matches_open_file(&self.directory, JOURNAL_A, &self.journal_a)?
+            && fs::regular_path_matches_open_file(&self.directory, JOURNAL_B, &self.journal_b)?
+            && fs::regular_path_matches_open_file(&self.directory, NEW_NOTE, &self.new_note)?
+            && fs::regular_path_matches_open_file(&self.directory, OLD_BACKUP, &self.old_backup)?
+            && self.media.iter().all(|(index, file)| {
+                fs::regular_path_matches_open_file(&self.directory, &media_name(*index), file)
+                    .unwrap_or(false)
+            }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn index(&self) -> usize {
+        self.index
+    }
+
+    pub(super) fn quarantine(&mut self) {
+        self.quarantined = true;
+    }
+
+    pub(super) fn is_quarantined(&self) -> bool {
+        self.quarantined
+    }
+
+    pub(super) fn restore_old_visibility(
+        &mut self,
+        destination: &OwnedFd,
+        target: &str,
+        old: &fs::FileFingerprint,
+        backup: &fs::FileFingerprint,
+        new: &fs::FileFingerprint,
+    ) -> Result<bool, VaultError> {
+        if note_state(destination, target, Some(old), Some(backup), new) == NoteState::Old {
+            self.quarantine();
+            return Ok(true);
+        }
+        if note_state(&self.directory, OLD_BACKUP, Some(old), Some(backup), new)
+            != NoteState::Backup
+        {
+            self.quarantine();
+            return Ok(false);
+        }
+        match note_state(destination, target, Some(old), Some(backup), new) {
+            NoteState::Missing => {
+                fs::rename_no_replace_between(&self.directory, OLD_BACKUP, destination, target)?
+            }
+            NoteState::New | NoteState::Unknown | NoteState::Backup => {
+                fs::rename_exchange_between(&self.directory, OLD_BACKUP, destination, target)?;
+                fs::sync_owned_directory(&self.directory)?;
+                fs::sync_owned_directory(destination)?;
+            }
+            NoteState::Old => unreachable!(),
+        }
+        self.quarantine();
+        Ok(note_state(destination, target, Some(old), Some(backup), new) == NoteState::Backup)
+    }
+
+    pub(super) fn begin(&mut self) -> Result<(), VaultError> {
+        if !self.verify_fixed_paths()? {
+            self.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        fs::reset_file(&mut self.new_note, b"")?;
+        fs::reset_file(&mut self.old_backup, b"")?;
+        for file in self.media.values_mut() {
+            fs::reset_file(file, b"")?;
+        }
+        self.persist(JournalPhase::Preparing, None, None, None, None)
+    }
+
+    pub(super) fn ensure_media(&mut self, index: usize) -> Result<&mut File, VaultError> {
+        let name = Self::fixed_media_name(index)?;
+        if self.media.contains_key(&index) {
+            let matches = {
+                let file = self.media.get(&index).expect("checked media file");
+                fs::regular_path_matches_open_file(&self.directory, &name, file)?
+            };
+            if !matches {
+                self.quarantine();
+                return Err(VaultError::UnsafeChild);
+            }
+            let file = self.media.get_mut(&index).expect("checked media file");
+            fs::reset_file(file, b"")?;
+            return Ok(file);
+        }
+        if fs::child_exists(&self.directory, &name)? {
+            self.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        let mut file = fs::create_exclusive_file(&self.directory, &name)?;
+        fs::reset_file(&mut file, b"")?;
+        fs::sync_owned_directory(&self.directory)?;
+        self.media.insert(index, file);
+        self.persist(JournalPhase::Preparing, None, None, None, None)?;
+        Ok(self.media.get_mut(&index).expect("inserted media file"))
+    }
+
+    pub(super) fn media_file(&self, index: usize) -> Result<&File, VaultError> {
+        self.media.get(&index).ok_or(VaultError::InvalidTransition)
+    }
+
+    pub(super) fn media_file_mut(&mut self, index: usize) -> Result<&mut File, VaultError> {
+        let name = Self::fixed_media_name(index)?;
+        let matches = self.media.get(&index).is_some_and(|file| {
+            fs::regular_path_matches_open_file(&self.directory, &name, file).unwrap_or(false)
+        });
+        if !matches {
+            self.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        self.media
+            .get_mut(&index)
+            .ok_or(VaultError::InvalidTransition)
+    }
+
+    pub(super) fn media_path_matches(&self, index: usize) -> Result<bool, VaultError> {
+        let file = self.media_file(index)?;
+        fs::regular_path_matches_open_file(&self.directory, &Self::fixed_media_name(index)?, file)
+    }
+
+    pub(super) fn recreate_media(&mut self, index: usize) -> Result<(), VaultError> {
+        let name = Self::fixed_media_name(index)?;
+        if fs::child_exists(&self.directory, &name)? {
+            self.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        let mut file = fs::create_exclusive_file(&self.directory, &name)?;
+        fs::reset_file(&mut file, b"")?;
+        fs::sync_owned_directory(&self.directory)?;
+        self.media.insert(index, file);
+        self.persist(
+            self.journal.phase,
+            self.journal.target.clone(),
+            self.journal.old.clone(),
+            self.journal.backup.clone(),
+            self.journal.new.clone(),
+        )
+    }
+
+    pub(super) fn write_new_note(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<fs::FileFingerprint, VaultError> {
+        if !fs::regular_path_matches_open_file(&self.directory, NEW_NOTE, &self.new_note)? {
+            self.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        fs::reset_file(&mut self.new_note, bytes)?;
+        fs::fingerprint_open_regular_file(&mut self.new_note)
+    }
+
+    pub(super) fn copy_old_note(
+        &mut self,
+        source: &mut File,
+    ) -> Result<fs::FileFingerprint, VaultError> {
+        if !fs::regular_path_matches_open_file(&self.directory, OLD_BACKUP, &self.old_backup)? {
+            self.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        fs::copy_file(source, &mut self.old_backup)?;
+        fs::fingerprint_open_regular_file(&mut self.old_backup)
+    }
+
+    pub(super) fn recreate_new_note(&mut self) -> Result<(), VaultError> {
+        if fs::child_exists(&self.directory, NEW_NOTE)? {
+            self.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        let mut file = fs::create_exclusive_file(&self.directory, NEW_NOTE)?;
+        fs::reset_file(&mut file, b"")?;
+        fs::sync_owned_directory(&self.directory)?;
+        self.new_note = file;
+        Ok(())
+    }
+
+    pub(super) fn reopen_new_note(
+        &mut self,
+        expected: &fs::FileFingerprint,
+    ) -> Result<(), VaultError> {
+        let mut file = fs::open_regular_file_for_update(&self.directory, NEW_NOTE)?;
+        if fs::fingerprint_open_regular_file(&mut file)? != *expected
+            || !fs::regular_file_matches_fingerprint(&self.directory, NEW_NOTE, expected)?
+        {
+            self.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        self.new_note = file;
+        Ok(())
+    }
+
+    pub(super) fn reset_to_empty(&mut self) -> Result<(), VaultError> {
+        if !self.verify_fixed_paths()? {
+            self.quarantine();
+            return Err(VaultError::UnsafeChild);
+        }
+        fs::reset_file(&mut self.new_note, b"")?;
+        fs::reset_file(&mut self.old_backup, b"")?;
+        for file in self.media.values_mut() {
+            fs::reset_file(file, b"")?;
+        }
+        self.persist(JournalPhase::Empty, None, None, None, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs as stdfs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+
+    fn temp() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "arthur-workspace-{}-{}",
+            std::process::id(),
+            COUNT.fetch_add(1, Ordering::Relaxed)
+        ));
+        stdfs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn torn_newest_journal_falls_back_to_the_prior_valid_generation() {
+        let path = temp();
+        let destination = fs::open_destination(&path).unwrap();
+        let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
+        slot.begin().unwrap();
+        assert_eq!(slot.journal.generation, 2);
+        drop(slot);
+        drop(destination);
+        stdfs::write(
+            path.join(WORKSPACE_NAME).join("slot-0").join(JOURNAL_A),
+            b"torn",
+        )
+        .unwrap();
+
+        let destination = fs::open_destination(&path).unwrap();
+        let slot = Workspace::open(&destination).unwrap().claim().unwrap();
+        assert_eq!(slot.index, 0);
+        assert_eq!(slot.journal.phase, JournalPhase::Empty);
+        drop(slot);
+        drop(destination);
+        stdfs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn corrupted_journals_quarantine_each_slot_and_fail_when_all_four_are_bad() {
+        let path = temp();
+        let destination = fs::open_destination(&path).unwrap();
+        drop(Workspace::open(&destination).unwrap());
+        drop(destination);
+        for index in 0..SLOT_COUNT {
+            let slot = path.join(WORKSPACE_NAME).join(format!("slot-{index}"));
+            stdfs::write(slot.join(JOURNAL_A), b"bad-a").unwrap();
+            stdfs::write(slot.join(JOURNAL_B), b"bad-b").unwrap();
+        }
+        let destination = fs::open_destination(&path).unwrap();
+        assert!(matches!(
+            Workspace::open(&destination),
+            Err(VaultError::UnsafeChild)
+        ));
+        drop(destination);
+        for index in 0..SLOT_COUNT {
+            let slot = path.join(WORKSPACE_NAME).join(format!("slot-{index}"));
+            assert_eq!(stdfs::read(slot.join(JOURNAL_A)).unwrap(), b"bad-a");
+            assert_eq!(stdfs::read(slot.join(JOURNAL_B)).unwrap(), b"bad-b");
+        }
+        stdfs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn checksum_valid_semantic_mismatch_and_generation_gap_do_not_fall_back() {
+        for gap in [false, true] {
+            let path = temp();
+            let destination = fs::open_destination(&path).unwrap();
+            let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
+            slot.begin().unwrap();
+            let mut invalid = slot.journal.clone();
+            if gap {
+                invalid.generation = 4;
+            } else {
+                invalid.target = Some("must-not-fallback.md".to_owned());
+            }
+            drop(slot);
+            drop(destination);
+            stdfs::write(
+                path.join(WORKSPACE_NAME).join("slot-0").join(JOURNAL_A),
+                encode_journal(invalid).unwrap(),
+            )
+            .unwrap();
+
+            let destination = fs::open_destination(&path).unwrap();
+            let slot = Workspace::open(&destination).unwrap().claim().unwrap();
+            assert_eq!(slot.index, 1);
+            drop(slot);
+            drop(destination);
+            stdfs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn unknown_new_note_substitute_is_never_adopted_or_truncated() {
+        for committed in [false, true] {
+            let path = temp();
+            let destination = fs::open_destination(&path).unwrap();
+            let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
+            slot.begin().unwrap();
+            let new = slot.write_new_note(b"new note").unwrap();
+            slot.persist(
+                JournalPhase::ExchangePending,
+                Some("Created.md".to_owned()),
+                None,
+                None,
+                Some(new.clone()),
+            )
+            .unwrap();
+            fs::rename_no_replace_between(&slot.directory, NEW_NOTE, &destination, "Created.md")
+                .unwrap();
+            let fixed = path.join(WORKSPACE_NAME).join("slot-0").join(NEW_NOTE);
+            if committed {
+                slot.recreate_new_note().unwrap();
+                slot.persist(
+                    JournalPhase::Committed,
+                    Some("Created.md".to_owned()),
+                    None,
+                    None,
+                    Some(new),
+                )
+                .unwrap();
+                stdfs::rename(&fixed, fixed.with_extension("arthur-owned")).unwrap();
+            }
+            stdfs::write(&fixed, b"unrelated substitute").unwrap();
+            drop(slot);
+            drop(destination);
+
+            let destination = fs::open_destination(&path).unwrap();
+            let next = Workspace::open(&destination).unwrap().claim().unwrap();
+            assert_eq!(next.index, 1);
+            assert_eq!(stdfs::read(&fixed).unwrap(), b"unrelated substitute");
+            assert_eq!(stdfs::read(path.join("Created.md")).unwrap(), b"new note");
+            drop(next);
+            drop(destination);
+            stdfs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn checksum_valid_noncanonical_fingerprint_quarantines_the_slot() {
+        let path = temp();
+        let destination = fs::open_destination(&path).unwrap();
+        let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
+        slot.begin().unwrap();
+        let mut invalid = slot.journal.clone();
+        invalid.phase = JournalPhase::ExchangePending;
+        invalid.target = Some("Target.md".to_owned());
+        invalid.new = Some(fs::FileFingerprint {
+            device: 1,
+            inode: 2,
+            size: 0,
+            sha256: "A".repeat(64),
+        });
+        drop(slot);
+        drop(destination);
+        stdfs::write(
+            path.join(WORKSPACE_NAME).join("slot-0").join(JOURNAL_A),
+            encode_journal(invalid).unwrap(),
+        )
+        .unwrap();
+
+        let destination = fs::open_destination(&path).unwrap();
+        let slot = Workspace::open(&destination).unwrap().claim().unwrap();
+        assert_eq!(slot.index, 1);
+        drop(slot);
+        drop(destination);
+        stdfs::remove_dir_all(path).unwrap();
+    }
+}
