@@ -18,10 +18,12 @@
 - Save direct HTTP(S) audio/video files; leave streaming manifests and iframes as remote links.
 - A matching normalized `source` overwrites its existing note in place; a same-title/different-source note must never be overwritten.
 - Resource limits are 100 MiB per image, 2 GiB per audio/video file, and 4 GiB total per save.
+- Markdown is limited to 10 MiB UTF-16 units; browser-to-host request frames are limited to 64 MiB and host-to-browser response frames to 1 MiB.
 - Production writes must remain inside the real selected destination and must reject child symlink escapes.
 - The Rust `Vault` module owns the destination and `attachments/` directory descriptors; no raw child mutation path or descriptor crosses its interface.
 - Every staging, attachment, probe, cleanup, and note mutation uses descriptor-relative no-follow `rustix` operations; the note is renamed last.
-- The browser-side Zod schemas are the canonical JSON interface and stay wire-compatible; strict Rust `serde` enums and shared fixtures must match every variant.
+- The browser-side Zod schemas are the canonical JSON interface; fields and variants stay wire-compatible, while strict Rust `serde` enums and shared fixtures must match every value constraint.
+- Media IDs are UUIDs generated with browser `crypto.randomUUID()`. Vault rewrites only exact registered UUID placeholders and preserves unknown literal `arthur-media://...` article text.
 - Normalize both the incoming source and every stored frontmatter source in Rust before comparing them.
 - After any framing, UTF-8, or JSON failure, permanently poison that decoder, emit at most one typed error, and terminate the native connection without parsing later bytes.
 - The installed native host is one binary with no Node runtime, launcher, copied `node_modules`, or shell `PATH` dependency.
@@ -591,7 +593,7 @@ Expected: the TypeScript fixture test passes against canonical Zod; Rust compila
 
 In `native/src/protocol.rs`, define internally tagged enums with `#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase", deny_unknown_fields)]`. Use `u64` for nonnegative JSON integer fields and `Option<T>` only for fields optional in Zod. `parse_client` must enforce the same length, UUID, MIME, media-size, chunk-size, base64, HTTP(S), and absolute-destination rules as `ClientMessageSchema`; it must normalize every client source with `url::Url`, clear its fragment, and store the serialized result. `parse_host` must enforce every HostMessage Zod length/UUID/path constraint so the shared valid/invalid host fixtures have the same result in both languages. `encode_frame` validates the host value before serialization.
 
-In `native/src/framing.rs`, use `MAX_NATIVE_MESSAGE_BYTES = 1_048_576` and this stateful interface:
+In `native/src/framing.rs`, use `MAX_NATIVE_REQUEST_BYTES = 67_108_864` for the inbound decoder and `MAX_NATIVE_RESPONSE_BYTES = 1_048_576` for encoded host responses. The 64 MiB inbound limit supports the strictest browser-to-host direction; the 1 MiB outbound limit supports the strictest host-to-browser direction. Use this stateful interface:
 
 ```rust
 pub struct FrameDecoder {
@@ -617,7 +619,7 @@ impl FrameDecoder {
 pub fn encode_frame(message: &HostMessage) -> Result<Vec<u8>, FrameError>;
 ```
 
-Add unit tests for split headers, split bodies, coalesced frames, normal empty-stream `finish`, truncated header/body at `finish`, zero length, 1 MiB + 1, invalid UTF-8, invalid JSON, and a valid frame after each failure. Each failure must poison immediately; each post-failure call to `push` or `finish` must return `Poisoned`, leave no decoded value, and not grow `buffered`.
+Add unit tests for split headers, split bodies, coalesced frames, normal empty-stream `finish`, truncated header/body at `finish`, zero length, 64 MiB + 1 inbound, 1 MiB + 1 outbound, invalid UTF-8, invalid JSON, and a valid frame after each failure. Each failure must poison immediately; each post-failure call to `push` or `finish` must return `Poisoned`, leave no decoded value, and not grow `buffered`.
 
 - [ ] **Step 6: Write failing Vault tests at the module's small interface and private helper seams**
 
@@ -747,9 +749,9 @@ pub struct SavedNote {
 
 Create `.arthur-stage-<validated-session-uuid>` with `mkdirat(destination_fd, ..., 0700)` and open it with `DIRECTORY | CLOEXEC | NOFOLLOW`. Generate fixed internal temp basenames from a monotonically increasing counter; never use `mediaId`, title, source, or another untrusted string as a mutation path. Decode base64 in the session adapter, but stream bytes here through a descriptor-backed `std::fs::File` while incrementally updating `sha2::Sha256` and all resource counters.
 
-At media finish, close and sync the staged file, compute its private final attachment basename, and retain either a saved mapping or normalized remote fallback mapping for that media ID. At commit, replace every successful `arthur-media://<id>` with `![[attachments/<private-name>]]`, replace every failed mapping with `<normalized-source>`, and reject any unresolved Arthur placeholder before any final rename.
+At media finish, close and sync the staged file, compute its private final attachment basename, and retain either a saved mapping or normalized remote fallback mapping for that media ID. Treat a write-failed fallback as open until `end_media` consumes it and returns the warning. At commit, replace every exact registered UUID `arthur-media://<id>` with either `![[attachments/<private-name>]]` or `<normalized-source>`. Preserve unknown literal `arthur-media://...` article text, and reject a registered media ID that has no terminal mapping before any final rename.
 
-Install each attachment with `renameat_with(..., RenameFlags::NOREPLACE)`. If the name already exists, open it through the attachments descriptor with `NOFOLLOW`, hash it, and reuse only an equal digest. Sync every new attachment and the attachments directory. Serialize the exact two-field note, write it to an exclusive stage file, call macOS full sync, and then use `renameat` only for a verified matching-source replacement or `renameat_with(..., NOREPLACE)` for a new filename. Rename the note last, sync the destination directory, then remove the emptied stage. A process killed before the note rename can leave only a hidden stage/new immutable attachment; the old note remains intact. `Vault::open` must clean stale Arthur stages using descriptor-relative enumeration and no-follow unlinking before a new save.
+Install each attachment with `renameat_with(..., RenameFlags::NOREPLACE)`. If the name already exists, open it through the attachments descriptor with `NOFOLLOW`, hash it, and reuse only an equal digest. Sync every new attachment and the attachments directory. Serialize the exact two-field note, write it to an exclusive stage file, and call macOS full sync. A matching-source replacement must use a recoverable descriptor-relative exchange/compare design tied to the verified inode; a race must preserve both files and return a conflict rather than overwrite an unrelated note. New notes use `renameat_with(..., NOREPLACE)`. Rename the note last, sync the destination directory, then treat cleanup as recoverable best effort. Every stage persists a synced Arthur ownership marker before content. Reapers delete only marker-verified Arthur stages; unverified reapers are preserved. A process killed before the note rename leaves the previous note intact, and a process killed during a recoverable exchange is repaired on the next `Vault::open` without deleting unrelated content.
 
 - [ ] **Step 4: Write failing session, dispatcher, and real-process tests**
 
@@ -764,6 +766,8 @@ invalid UTF-8 -> one invalid_native_frame error, then process exits nonzero
 invalid JSON followed by valid hello -> only one error; no hello_result
 zero/oversized frame followed by valid hello -> only one error; no hello_result
 EOF with an active session -> process exits, old note unchanged
+one host holding a live destination session -> a second real host cannot begin there; after the first exits, a new host can begin
+10 MiB Markdown boundary -> accepted; 10 MiB + 1 -> rejected without poisoning a valid-sized frame
 ```
 
 Capture stdout and stderr separately and validate every stdout value against a `HostMessage` before asserting fields.

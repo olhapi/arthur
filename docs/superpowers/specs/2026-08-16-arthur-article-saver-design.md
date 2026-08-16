@@ -79,7 +79,7 @@ The project owns only the small additional Markdown rules it needs: fenced code,
 
 The background service coordinates extraction, media retrieval, native transfer, and toolbar state. It fetches retained media with extension host permissions and streams the response into bounded native-messaging chunks. It does not decode or transcode media.
 
-The coordinator preflights retained media responses, streams eligible bodies, and reports transfer completion using the existing native-messaging contract. The Rust Vault module owns the placeholder-to-attachment mapping and rewrites successfully saved references to Obsidian embeds at commit. The coordinator records preflight failures as remote links; Vault records failures after a media transfer begins. Either path yields a warning without discarding the article. An HTTP(S) audio or video file URL is direct unless its URL or response content type identifies a streaming manifest such as HLS or DASH. Unsupported schemes, streamed sources, and iframes remain remote links.
+The coordinator preflights retained media responses, streams eligible bodies, and reports transfer completion using the existing native-messaging fields and variants. Each extraction uses cryptographically random UUID media identifiers. The Rust Vault module owns the exact registered placeholder-to-attachment mapping and rewrites successfully saved references to Obsidian embeds at commit; unknown literal `arthur-media://...` article text is preserved. The coordinator records preflight failures as remote links; Vault records failures after a media transfer begins. Either path yields a warning without discarding the article. An HTTP(S) audio or video file URL is direct unless its URL or response content type identifies a streaming manifest such as HLS or DASH. Unsupported schemes, streamed sources, and iframes remain remote links.
 
 ### Options and status UI
 
@@ -104,7 +104,7 @@ The action has no popup during the normal one-click flow. When a failure or warn
 
 The helper is one self-contained Rust macOS binary. It uses the browser native-messaging protocol: four-byte little-endian message length followed by UTF-8 JSON. The browser-side Zod schemas remain the canonical JSON interface. Strict Rust `serde` enums match those schemas through shared cross-language fixtures; Rust then validates semantic constraints and every transfer transition.
 
-Frame decoding is fail-closed. After any invalid length, truncated frame at EOF, other framing failure, UTF-8 failure, or JSON failure, the decoder becomes permanently poisoned, emits at most one typed error, accepts no later frame, and the host exits. Protocol output is written only to stdout; diagnostics are written only to stderr.
+Frame decoding is fail-closed. Browser-to-host request frames are capped at 64 MiB, matching the strictest supported browser direction; host-to-browser response frames remain capped at 1 MiB. Markdown is capped at 10 MiB UTF-16 units so even worst-case JSON escaping plus the bounded envelope fits the 64 MiB request frame. After any invalid length, truncated frame at EOF, other framing failure, UTF-8 failure, or JSON failure, the decoder becomes permanently poisoned, emits at most one typed error, accepts no later frame, and the host exits. Protocol output is written only to stdout; diagnostics are written only to stderr.
 
 The native filesystem seam is a deep `Vault` module with a small interface. Its implementation opens and owns the selected destination and lowercase `attachments/` directory descriptors. Save transactions remain opaque outside the module: raw child mutation paths and directory descriptors never cross its interface. Staging, attachment installation, note replacement, cleanup, scanning, and write probes use descriptor-relative, no-follow `rustix` operations (`openat`, `mkdirat`, `renameat`/`renameat_with`, `unlinkat`, `statat`, and descriptor syncs).
 
@@ -157,7 +157,8 @@ Resource limits are:
 - 100 MiB per image.
 - 2 GiB per direct audio or video file.
 - 4 GiB total media per save.
-- A bounded number and byte size for individual native messages.
+- 10 MiB UTF-16 units of Markdown per save.
+- 64 MiB per browser-to-host request frame and 1 MiB per host-to-browser response frame.
 
 Oversized media remains a remote link and creates a warning. Invalid article metadata, malformed protocol state, native-host absence, an invalid destination, or an unwritable destination fails the save with a typed actionable error.
 
