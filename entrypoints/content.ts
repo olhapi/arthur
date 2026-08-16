@@ -13,24 +13,33 @@ export interface LocationLike {
 
 export type ArticleExtractor<Result> = (document: Document, finalUrl: string) => Result;
 
-/** Creates the content-message seam independently of extension globals. */
-export function createExtractionMessageHandler<Result>(
+export interface ExtractionRuntime {
+  onMessage: {
+    addListener(
+      listener: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | undefined,
+    ): void;
+  };
+}
+
+/** Registers Chrome's callback transport explicitly so the response crosses the extension boundary. */
+export function registerExtractionListener<Result>(
+  runtime: ExtractionRuntime,
   document: Document,
   location: LocationLike,
   extract: ArticleExtractor<Result>,
-): (message: unknown) => Result | undefined {
-  return (message: unknown) => {
+): void {
+  runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (typeof message !== "object" || message === null || (message as { type?: unknown }).type !== "extract_article") {
       return undefined;
     }
-    return extract(document, location.href);
-  };
+    sendResponse(extract(document, location.href));
+    return true;
+  });
 }
 
 export default defineContentScript({
   matches: ["http://*/*", "https://*/*"],
   main() {
-    const handler = createExtractionMessageHandler<ExtractedArticle>(document, location, extractArticle);
-    browser.runtime.onMessage.addListener(handler);
+    registerExtractionListener<ExtractedArticle>(browser.runtime as unknown as ExtractionRuntime, document, location, extractArticle);
   },
 });

@@ -52,3 +52,44 @@ facades; production uses WXT's unified `browser` API.
   the existing `StatusController`.
 - Options/status markup uses labels, buttons, `aria-live`, system fonts,
   light/dark color schemes, and visible keyboard focus.
+
+## Review fix round 1
+
+### RED → GREEN evidence
+
+- Registered content transport: RED proved the runtime listener had no callback
+  response transport; GREEN registers a listener that calls `sendResponse` and
+  returns literal `true` for extraction requests.
+- Status retry: RED modeled browser-action popup interception and proved neither
+  the popup nor background offered a retry; GREEN adds an accessible Retry save
+  action using a callback-backed `retry_save` background message.
+- Native validation: RED used `requestSubmit()` after correcting an invalid path
+  and remained blocked by stale custom validity; GREEN clears it on input.
+- Native-session serialization and status isolation: RED started two saves for
+  different tabs over one client and exposed unscoped stored detail; GREEN uses
+  one global in-flight save and stores/loads actionable detail by tab ID.
+- Connection classification: RED showed a post-hello destination failure had no
+  testable typed boundary; GREEN keeps the host available and reports only the
+  folder check as failed.
+
+### Verification
+
+- Focused reviewed regressions pass as part of 15 files and 75 tests.
+- Standard TypeScript compilation includes and passes all production entrypoints.
+- Chrome MV3, Edge MV3, and Firefox MV2 builds pass.
+- Generated manifests retain `storage`, `nativeMessaging`, HTTP(S) access, no
+  default popup, and Firefox ID `arthur@olhapi.com`.
+- Light error text `#b42318` on `#ffffff` measures `6.57:1`; dark error text
+  `#ffdad6` on the explicit `#121212` background measures `14.50:1`.
+
+### Review checklist
+
+- Extraction results cross the real runtime listener through a supported
+  callback response instead of a plain return value.
+- A warning/error popup has an intentional retry path even though its presence
+  suppresses `action.onClicked`.
+- Corrected destinations can pass native form validation and save.
+- Only one save can own the shared `NativeClient`; stored status is scoped and
+  filtered to the active tab before rendering.
+- Host handshake and destination access failures remain distinct typed results.
+- Both light and dark error colors exceed WCAG AA contrast for normal text.

@@ -19,33 +19,49 @@ export interface BackgroundBrowserFacade {
   tabs: {
     query(query: { active: boolean; currentWindow: boolean }): Promise<readonly ActiveTab[]>;
   };
+  runtime: {
+    onMessage: {
+      addListener(
+        listener: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | undefined,
+      ): void;
+    };
+  };
 }
 
 export interface SaveCoordinatorFacade {
   save(tabId: number, tabUrl: string): Promise<unknown>;
 }
 
-/** Wires toolbar clicks while keeping per-tab save serialization at the entrypoint boundary. */
+/** Wires toolbar clicks while serializing access to the coordinator's one native client. */
 export function createBackgroundController(
   browser: BackgroundBrowserFacade,
   coordinator: SaveCoordinatorFacade,
 ): void {
-  const savingTabs = new Set<number>();
+  let saving = false;
+
+  const saveActiveTab = async (clickedTab: ActiveTab = {}): Promise<void> => {
+    const activeTabs = await browser.tabs.query({ active: true, currentWindow: true });
+    const activeTab = activeTabs[0] ?? clickedTab;
+    if (activeTab.id === undefined || activeTab.url === undefined || saving) return;
+
+    saving = true;
+    try {
+      await browser.action.setPopup({ tabId: activeTab.id, popup: "" });
+      await coordinator.save(activeTab.id, activeTab.url);
+    } finally {
+      saving = false;
+    }
+  };
 
   browser.action.onClicked.addListener((clickedTab) => {
-    void (async () => {
-      const activeTabs = await browser.tabs.query({ active: true, currentWindow: true });
-      const activeTab = activeTabs[0] ?? clickedTab;
-      if (activeTab.id === undefined || activeTab.url === undefined || savingTabs.has(activeTab.id)) return;
-
-      savingTabs.add(activeTab.id);
-      try {
-        await browser.action.setPopup({ tabId: activeTab.id, popup: "" });
-        await coordinator.save(activeTab.id, activeTab.url);
-      } finally {
-        savingTabs.delete(activeTab.id);
-      }
-    })();
+    void saveActiveTab(clickedTab);
+  });
+  browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (typeof message !== "object" || message === null || (message as { type?: unknown }).type !== "retry_save") {
+      return undefined;
+    }
+    void saveActiveTab().then(() => sendResponse({ ok: true }));
+    return true;
   });
 }
 

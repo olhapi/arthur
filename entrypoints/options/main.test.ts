@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mountOptionsPage } from "./main.js";
+import { mountOptionsPage, testNativeConnection } from "./main.js";
 
 function optionsDocument(): Document {
   document.body.innerHTML = `
@@ -66,6 +66,27 @@ describe("mountOptionsPage", () => {
     }
   });
 
+  it("clears custom validity while editing so a corrected requestSubmit saves", async () => {
+    const storage = {
+      getSettings: vi.fn().mockResolvedValue(undefined),
+      saveSettings: vi.fn().mockResolvedValue(undefined),
+    };
+    const page = mountOptionsPage(optionsDocument(), { storage, testConnection: vi.fn() });
+    await page.ready;
+    const input = document.querySelector<HTMLInputElement>("#destination")!;
+    const form = document.querySelector<HTMLFormElement>("#options-form")!;
+
+    input.value = "relative/clippings";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    expect(input.validationMessage).toBe("Destination must be an absolute path.");
+
+    input.value = "/Vault/Corrected";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(input.validationMessage).toBe("");
+    form.requestSubmit();
+    await vi.waitFor(() => expect(storage.saveSettings).toHaveBeenCalledWith({ destination: "/Vault/Corrected" }));
+  });
+
   it("tests native-host and destination access with the entered absolute path", async () => {
     const testConnection = vi.fn().mockResolvedValue({
       host: { kind: "success", message: "Native host available." },
@@ -85,5 +106,21 @@ describe("mountOptionsPage", () => {
     expect(testConnection).toHaveBeenCalledWith("/Vault/Clippings");
     expect(document.querySelector("#host-status")?.textContent).toBe("Native host available.");
     expect(document.querySelector("#folder-status")?.textContent).toBe("Destination is writable.");
+  });
+});
+
+describe("testNativeConnection", () => {
+  it("keeps the host available when only destination testing fails", async () => {
+    const client = {
+      hello: vi.fn().mockResolvedValue({ type: "hello_result" }),
+      request: vi.fn().mockRejectedValue(new Error("destination denied")),
+      close: vi.fn(),
+    };
+
+    await expect(testNativeConnection("/Vault/Denied", () => client)).resolves.toEqual({
+      host: { kind: "success", message: "Native host available." },
+      folder: { kind: "error", message: "Destination could not be checked." },
+    });
+    expect(client.close).toHaveBeenCalledOnce();
   });
 });

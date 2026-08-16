@@ -48,8 +48,8 @@ describe("StatusController", () => {
       "popup:17:status.html",
     ]);
     expect(browser.details).toEqual([
-      { kind: "warning", details: [{ code: "media_fallback", message: "The original link was retained." }] },
-      { kind: "error", details: [{ code: "commit_failed", message: "The article could not be committed." }] },
+      { tabId: 17, kind: "warning", details: [{ code: "media_fallback", message: "The original link was retained." }] },
+      { tabId: 17, kind: "error", details: [{ code: "commit_failed", message: "The article could not be committed." }] },
     ]);
   });
 });

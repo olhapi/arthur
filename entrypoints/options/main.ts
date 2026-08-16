@@ -62,6 +62,8 @@ export function mountOptionsPage(document: Document, dependencies: OptionsDepend
     return settings;
   };
 
+  destination.addEventListener("input", () => destination.setCustomValidity(""));
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const settings = parseInput();
@@ -104,31 +106,55 @@ function browserStorage(): OptionsStorage {
   };
 }
 
-async function testNativeConnection(destination: string): Promise<ConnectionResult> {
-  let client: ReturnType<typeof connectNativeClient> | undefined;
+export interface NativeTestClient {
+  hello(): Promise<unknown>;
+  request(message: { type: "test_destination"; requestId: string; destination: string }): Promise<unknown>;
+  close(): void;
+}
+
+export async function testNativeConnection(
+  destination: string,
+  createClient: () => NativeTestClient = () =>
+    connectNativeClient((hostName) => browser.runtime.connectNative(hostName)),
+): Promise<ConnectionResult> {
+  let client: NativeTestClient | undefined;
   try {
-    client = connectNativeClient((hostName) => browser.runtime.connectNative(hostName));
+    client = createClient();
     await client.hello();
+  } catch {
+    client?.close();
+    return {
+      host: { kind: "error", message: "Native host is unavailable." },
+      folder: { kind: "error", message: "Destination could not be checked." },
+    };
+  }
+
+  try {
     const response = await client.request({
       type: "test_destination",
       requestId: crypto.randomUUID(),
       destination,
     });
-    if (response.type !== "test_destination_result") {
+    if (
+      typeof response !== "object" ||
+      response === null ||
+      (response as { type?: unknown }).type !== "test_destination_result" ||
+      typeof (response as { writable?: unknown }).writable !== "boolean"
+    ) {
       return {
-        host: { kind: "error", message: "Native host returned an invalid destination result." },
+        host: { kind: "success", message: "Native host available." },
         folder: { kind: "error", message: "Destination could not be checked." },
       };
     }
     return {
       host: { kind: "success", message: "Native host available." },
-      folder: response.writable
+      folder: (response as { writable: boolean }).writable
         ? { kind: "success", message: "Destination is writable." }
         : { kind: "error", message: "Destination is not writable." },
     };
   } catch {
     return {
-      host: { kind: "error", message: "Native host is unavailable." },
+      host: { kind: "success", message: "Native host available." },
       folder: { kind: "error", message: "Destination could not be checked." },
     };
   } finally {

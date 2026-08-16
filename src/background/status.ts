@@ -6,7 +6,7 @@ export interface StatusDetail {
 export interface StatusBrowserAdapter {
   setBadgeText(details: { tabId: number; text: string }): Promise<void> | void;
   setPopup(details: { tabId: number; popup: string }): Promise<void> | void;
-  setLocal(value: { kind: "warning" | "error"; details: readonly StatusDetail[] }): Promise<void> | void;
+  setLocal(value: { tabId: number; kind: "warning" | "error"; details: readonly StatusDetail[] }): Promise<void> | void;
 }
 
 export interface SaveStatus {
@@ -32,13 +32,13 @@ export class StatusController implements SaveStatus {
 
   async warning(tabId: number, details: readonly StatusDetail[]): Promise<void> {
     await this.browser.setBadgeText({ tabId, text: "!" });
-    await this.browser.setLocal({ kind: "warning", details });
+    await this.browser.setLocal({ tabId, kind: "warning", details });
     await this.browser.setPopup({ tabId, popup: "status.html" });
   }
 
   async error(tabId: number, detail: StatusDetail): Promise<void> {
     await this.browser.setBadgeText({ tabId, text: "!" });
-    await this.browser.setLocal({ kind: "error", details: [detail] });
+    await this.browser.setLocal({ tabId, kind: "error", details: [detail] });
     await this.browser.setPopup({ tabId, popup: "status.html" });
   }
 }

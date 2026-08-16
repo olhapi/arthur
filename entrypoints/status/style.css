@@ -5,9 +5,13 @@
 
 body {
   margin: 0;
+  color: #1b1b1b;
+  background: #fff;
 }
 
 main {
+  display: grid;
+  gap: 0.75rem;
   max-width: 30rem;
   padding: 1rem;
 }
@@ -22,7 +26,28 @@ ul {
   padding-inline-start: 1.3rem;
 }
 
+button {
+  justify-self: start;
+  padding: 0.45rem 0.7rem;
+  font: inherit;
+}
+
 :focus-visible {
   outline: 3px solid Highlight;
   outline-offset: 2px;
+}
+
+[data-kind="error"] {
+  color: #b42318;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #f5f5f5;
+    background: #121212;
+  }
+
+  [data-kind="error"] {
+    color: #ffdad6;
+  }
 }
