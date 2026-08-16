@@ -28,13 +28,28 @@ class FakeNativePort implements NativePortAdapter {
   readonly onMessage = new Listeners<unknown>();
   readonly onDisconnect = new Listeners<void>();
   disconnected = false;
+  disconnectCalls = 0;
+  hostTransactionActive = false;
+  destinationLocked = false;
+  throwOnMessageType: string | undefined;
 
   postMessage(message: unknown): void {
+    const type = (message as { type?: string }).type;
+    if (type === this.throwOnMessageType) throw new Error(`Failed to post ${type}.`);
     this.posted.push(message);
+    if (type === "begin_save") {
+      this.hostTransactionActive = true;
+      this.destinationLocked = true;
+    }
   }
 
   disconnect(): void {
+    this.disconnectCalls += 1;
     this.disconnected = true;
+    // Native server EOF runs SessionManager::abort_all(), which drops the
+    // VaultTransaction and releases its destination flock.
+    this.hostTransactionActive = false;
+    this.destinationLocked = false;
   }
 
   emitMessage(message: unknown): void {
@@ -46,7 +61,12 @@ class FakeNativePort implements NativePortAdapter {
   }
 }
 
-async function beginOpenMedia(client: NativeClient, port: FakeNativePort): Promise<void> {
+function sequentialRequestIds(): () => string {
+  let next = 0;
+  return () => `request-${++next}`;
+}
+
+async function beginSave(client: NativeClient, port: FakeNativePort): Promise<void> {
   const save = client.beginSave({
     sessionId: SESSION_ID,
     destination: "/Vault/Clippings",
@@ -56,6 +76,10 @@ async function beginOpenMedia(client: NativeClient, port: FakeNativePort): Promi
   });
   port.emitMessage({ type: "ack", requestId: "request-1", sessionId: SESSION_ID });
   await save;
+}
+
+async function beginOpenMedia(client: NativeClient, port: FakeNativePort): Promise<void> {
+  await beginSave(client, port);
 
   const media = client.beginMedia({
     mediaId: MEDIA_ID,
@@ -101,10 +125,7 @@ describe("NativeClient", () => {
 
   it("resolves chunks only for the canonical acknowledgement tuple", async () => {
     const port = new FakeNativePort();
-    const client = new NativeClient(port, { createRequestId: (() => {
-      let next = 0;
-      return () => `request-${++next}`;
-    })() });
+    const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });
     await beginOpenMedia(client, port);
 
     const chunk = client.sendChunk({
@@ -124,19 +145,148 @@ describe("NativeClient", () => {
       requestId: "chunk",
       sessionId: SESSION_ID,
       mediaId: MEDIA_ID,
-      sequence: 1,
-    });
-    await Promise.resolve();
-    expect(settled).toBe(false);
-
-    port.emitMessage({
-      type: "ack",
-      requestId: "chunk",
-      sessionId: SESSION_ID,
-      mediaId: MEDIA_ID,
       sequence: 0,
     });
     await expect(chunk).resolves.toMatchObject({ type: "ack", requestId: "chunk" });
+  });
+
+  it("terminally closes an active host when commit posting throws and rejects concurrent pending work once", async () => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });
+    await beginSave(client, port);
+
+    let concurrentRejections = 0;
+    void client.request({ type: "hello", requestId: "parallel-hello", protocolVersion: 1 }).catch(() => {
+      concurrentRejections += 1;
+    });
+    port.throwOnMessageType = "commit_save";
+    let commitRejections = 0;
+    const commit = client.commitSave().catch((error: unknown) => {
+      commitRejections += 1;
+      throw error;
+    });
+
+    await expect(commit).rejects.toBeInstanceOf(NativeDisconnectedError);
+    await Promise.resolve();
+    expect({ commitRejections, concurrentRejections }).toEqual({ commitRejections: 1, concurrentRejections: 1 });
+    expect(port.disconnectCalls).toBe(1);
+    expect(port.hostTransactionActive).toBe(false);
+    expect(port.destinationLocked).toBe(false);
+    expect(client.sessionId).toBeUndefined();
+
+    port.emitDisconnect();
+    port.emitMessage({ unexpected: true });
+    await Promise.resolve();
+    expect({ commitRejections, concurrentRejections }).toEqual({ commitRejections: 1, concurrentRejections: 1 });
+    expect(port.disconnectCalls).toBe(1);
+  });
+
+  it.each([
+    {
+      failure: "malformed",
+      response: { type: "save_result", requestId: "request-2", sessionId: SESSION_ID, savedPath: "/Vault/Article.md", extra: true },
+    },
+    {
+      failure: "wrong session",
+      response: {
+        type: "ack",
+        requestId: "request-2",
+        sessionId: "e0ddc6e9-9075-455f-9af0-2d2fd08dcc6d",
+      },
+    },
+    {
+      failure: "wrong request",
+      response: {
+        type: "ack",
+        requestId: "request-99",
+        sessionId: SESSION_ID,
+      },
+    },
+  ])("terminally closes an active host after a $failure commit response", async ({ response }) => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });
+    await beginSave(client, port);
+    let rejections = 0;
+    let rejection: unknown;
+    void client.commitSave().catch((error: unknown) => {
+      rejections += 1;
+      rejection = error;
+    });
+
+    port.emitMessage(response);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(rejections).toBe(1);
+    expect(rejection).toBeInstanceOf(NativeProtocolError);
+    expect(port.disconnectCalls).toBe(1);
+    expect(port.hostTransactionActive).toBe(false);
+    expect(port.destinationLocked).toBe(false);
+    expect(client.sessionId).toBeUndefined();
+  });
+
+  it.each([
+    { failure: "post failure", throwOnPost: true, sequence: 0 },
+    { failure: "tuple mismatch", throwOnPost: false, sequence: 1 },
+  ])("terminally closes an active host after a chunk $failure", async ({ throwOnPost, sequence }) => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });
+    await beginOpenMedia(client, port);
+    if (throwOnPost) port.throwOnMessageType = "media_chunk";
+    let rejections = 0;
+    void client.sendChunk({
+      type: "media_chunk",
+      sessionId: SESSION_ID,
+      mediaId: MEDIA_ID,
+      sequence: 0,
+      data: "AQ==",
+    }).catch(() => {
+      rejections += 1;
+    });
+    if (!throwOnPost) {
+      port.emitMessage({ type: "ack", requestId: "chunk", sessionId: SESSION_ID, mediaId: MEDIA_ID, sequence });
+    }
+    await Promise.resolve();
+
+    expect(rejections).toBe(1);
+    expect(port.disconnectCalls).toBe(1);
+    expect(port.hostTransactionActive).toBe(false);
+    expect(port.destinationLocked).toBe(false);
+    expect(client.sessionId).toBeUndefined();
+  });
+
+  it.each([
+    { errorSessionId: SESSION_ID, description: "matching session" },
+    { errorSessionId: undefined, description: "omitted optional session" },
+  ])("keeps an active session open for a correlated typed host error with $description", async ({ errorSessionId }) => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });
+    await beginSave(client, port);
+    const media = client.beginMedia({
+      mediaId: MEDIA_ID,
+      source: "https://cdn.example.test/hero.webp",
+      kind: "image",
+      contentType: "image/webp",
+      declaredBytes: 1,
+    });
+    port.emitMessage({
+      type: "error",
+      requestId: "request-2",
+      ...(errorSessionId === undefined ? {} : { sessionId: errorSessionId }),
+      code: "media_open_failed",
+      message: "The media could not be opened.",
+    });
+
+    await expect(media).rejects.toBeInstanceOf(NativeHostError);
+    expect(port.disconnected).toBe(false);
+    expect(port.hostTransactionActive).toBe(true);
+    expect(client.sessionId).toBe(SESSION_ID);
+
+    const abort = client.abortSave("Recover after media error.");
+    port.emitMessage({ type: "ack", requestId: "request-3", sessionId: SESSION_ID });
+    await expect(abort).resolves.toBeUndefined();
+    expect(port.disconnected).toBe(false);
+    expect(client.sessionId).toBeUndefined();
   });
 
   it("rejects malformed outbound and inbound protocol messages", async () => {
@@ -193,10 +343,7 @@ describe("NativeClient", () => {
 
   it("surfaces a request-less chunk error to the sole in-flight chunk", async () => {
     const port = new FakeNativePort();
-    const client = new NativeClient(port, { createRequestId: (() => {
-      let next = 0;
-      return () => `request-${++next}`;
-    })() });
+    const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });
     await beginOpenMedia(client, port);
 
     const chunk = client.sendChunk({

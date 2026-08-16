@@ -61,12 +61,16 @@ interface ActiveSession {
   media: Map<string, ActiveMedia>;
 }
 
-interface PendingRequest {
+interface PendingOperation {
   resolve: (message: HostMessage) => void;
   reject: (error: Error) => void;
 }
 
-interface PendingChunk extends PendingRequest {
+interface PendingRequest extends PendingOperation {
+  request: RequestMessage;
+}
+
+interface PendingChunk extends PendingOperation {
   sessionId: string;
   mediaId: string;
   sequence: number;
@@ -130,6 +134,35 @@ function expectAck(message: HostMessage, requestId: string, sessionId: string): 
   }
 }
 
+function requestSessionId(message: RequestMessage): string | undefined {
+  return "sessionId" in message ? message.sessionId : undefined;
+}
+
+function responseMatchesRequest(response: HostMessage, request: RequestMessage): boolean {
+  switch (request.type) {
+    case "hello":
+      return response.type === "hello_result";
+    case "test_destination":
+      return response.type === "test_destination_result";
+    case "begin_save":
+    case "begin_media":
+    case "abort_save":
+      return response.type === "ack" && response.sessionId === request.sessionId;
+    case "end_media":
+      return (
+        ((response.type === "ack" && response.mediaId === request.mediaId) || response.type === "warning") &&
+        response.sessionId === request.sessionId
+      );
+    case "commit_save":
+      return response.type === "save_result" && response.sessionId === request.sessionId;
+  }
+}
+
+function errorMatchesRequest(response: Extract<HostMessage, { type: "error" }>, request: RequestMessage): boolean {
+  const sessionId = requestSessionId(request);
+  return response.sessionId === undefined || response.sessionId === sessionId;
+}
+
 /**
  * Correlates validated native-messaging requests with host responses. It keeps
  * accounting private to one active save session so a service-worker lifetime
@@ -176,12 +209,11 @@ export class NativeClient {
     }
 
     return new Promise<HostMessage>((resolve, reject) => {
-      this.pendingRequests.set(outgoing.requestId, { resolve, reject });
+      this.pendingRequests.set(outgoing.requestId, { resolve, reject, request: outgoing });
       try {
         this.port.postMessage(outgoing);
       } catch {
-        this.pendingRequests.delete(outgoing.requestId);
-        reject(new NativeDisconnectedError());
+        this.terminate(new NativeDisconnectedError());
       }
     });
   }
@@ -233,8 +265,7 @@ export class NativeClient {
       try {
         this.port.postMessage(chunk);
       } catch {
-        this.pendingChunk = undefined;
-        reject(new NativeDisconnectedError());
+        this.terminate(new NativeDisconnectedError());
       }
     });
   }
@@ -347,13 +378,7 @@ export class NativeClient {
   }
 
   close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    try {
-      this.port.disconnect();
-    } finally {
-      this.failAll(new NativeDisconnectedError());
-    }
+    this.terminate(new NativeDisconnectedError());
   }
 
   private nextRequestId(): string {
@@ -369,14 +394,10 @@ export class NativeClient {
   }
 
   private handleMessage(message: unknown): void {
+    if (this.closed) return;
     const parsed = HostMessageSchema.safeParse(message);
     if (!parsed.success) {
-      this.closed = true;
-      try {
-        this.port.disconnect();
-      } finally {
-        this.failAll(new NativeProtocolError());
-      }
+      this.terminate(new NativeProtocolError());
       return;
     }
     const response = parsed.data;
@@ -390,29 +411,66 @@ export class NativeClient {
       ) {
         this.pendingChunk = undefined;
         pending.resolve(response);
+      } else if (this.hasActiveSession()) {
+        this.terminate(new NativeProtocolError("The native host returned an unexpected chunk acknowledgement."));
       }
       return;
     }
     if (response.type === "error") {
       const error = new NativeHostError(response.code, response.message);
       if (response.requestId !== undefined) {
-        this.rejectRequest(response.requestId, error);
+        const pending = this.pendingRequests.get(response.requestId);
+        if (pending !== undefined && errorMatchesRequest(response, pending.request)) {
+          this.rejectRequest(response.requestId, error);
+        } else if (this.hasActiveSession()) {
+          this.terminate(new NativeProtocolError("The native host returned an uncorrelated error."));
+        }
         return;
       }
       const pending = this.pendingChunk;
       if (pending !== undefined && response.sessionId === pending.sessionId) {
         this.pendingChunk = undefined;
         pending.reject(error);
+      } else if (this.hasActiveSession()) {
+        this.terminate(new NativeProtocolError("The native host returned an uncorrelated error."));
       }
       return;
     }
-    if (response.requestId !== undefined) this.resolveRequest(response.requestId, response);
+    if (response.requestId === undefined) {
+      if (this.hasActiveSession()) {
+        this.terminate(new NativeProtocolError("The native host returned an uncorrelated response."));
+      }
+      return;
+    }
+    const pending = this.pendingRequests.get(response.requestId);
+    if (pending !== undefined && responseMatchesRequest(response, pending.request)) {
+      this.resolveRequest(response.requestId, response);
+    } else if (this.hasActiveSession()) {
+      this.terminate(new NativeProtocolError("The native host returned an unexpected correlated response."));
+    }
   }
 
   private handleDisconnect(): void {
     if (this.closed) return;
     this.closed = true;
     this.failAll(new NativeDisconnectedError());
+  }
+
+  private hasActiveSession(): boolean {
+    return this.beginning || this.session !== undefined;
+  }
+
+  private terminate(error: Error): void {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      this.port.disconnect();
+    } catch {
+      // Closing is best effort, but all local operations and accounting must
+      // still be failed and cleared if the adapter also throws here.
+    } finally {
+      this.failAll(error);
+    }
   }
 
   private resolveRequest(requestId: string, response: HostMessage): void {

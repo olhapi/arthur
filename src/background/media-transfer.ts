@@ -204,6 +204,7 @@ export async function transferMedia(prepared: PreparedMedia, client: NativeClien
     return completion.type === "warning" ? "fallback" : "saved";
   } catch (error) {
     if (!begun) throw error;
+    if (client.sessionId === undefined) throw error;
     const completion = await client.endMedia(prepared.media.id, FALLBACK_CHUNK_COUNT);
     if (completion.type === "warning") return "fallback";
     throw error;

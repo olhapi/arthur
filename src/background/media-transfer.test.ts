@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { MEDIA_LIMITS, NATIVE_CHUNK_BYTES } from "../shared/constants.js";
-import { NativeClient, type NativePortAdapter } from "./native-client.js";
+import { NativeClient, NativeDisconnectedError, type NativePortAdapter } from "./native-client.js";
 import { preflightMedia, transferMedia, type PreparedMedia } from "./media-transfer.js";
 
 const SESSION_ID = "a5a74c85-92de-4a5d-9768-4e66c4d64987";
@@ -27,9 +27,12 @@ class TransferPort implements NativePortAdapter {
   readonly onDisconnect = new Listeners<void>();
   acknowledgeChunks = true;
   fallbackOnEnd = false;
+  disconnectCalls = 0;
+  throwOnMessageType: string | undefined;
 
   postMessage(message: unknown): void {
     const posted = message as PostedMessage;
+    if (posted.type === this.throwOnMessageType) throw new Error(`Failed to post ${String(posted.type)}.`);
     this.posted.push(posted);
     if (posted.type === "media_chunk" && this.acknowledgeChunks) {
       queueMicrotask(() => {
@@ -84,7 +87,9 @@ class TransferPort implements NativePortAdapter {
     }
   }
 
-  disconnect(): void {}
+  disconnect(): void {
+    this.disconnectCalls += 1;
+  }
 }
 
 function media(id = MEDIA_ID) {
@@ -241,6 +246,20 @@ describe("transferMedia", () => {
     expect(port.posted.find((message) => message.type === "end_media")).toMatchObject({
       chunks: Number.MAX_SAFE_INTEGER,
     });
+  });
+
+  it("preserves a terminal native error instead of attempting fallback on the closed session", async () => {
+    const port = new TransferPort();
+    const client = await activeClient(port);
+    port.throwOnMessageType = "media_chunk";
+
+    await expect(transferMedia(prepared(new Response(new Uint8Array([1]))), client)).rejects.toBeInstanceOf(
+      NativeDisconnectedError,
+    );
+
+    expect(port.disconnectCalls).toBe(1);
+    expect(port.posted.some((message) => message.type === "end_media")).toBe(false);
+    expect(client.sessionId).toBeUndefined();
   });
 
   it("enforces an unknown-length individual budget incrementally", async () => {
