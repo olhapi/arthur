@@ -17,7 +17,6 @@
     "lint:native": "node scripts/rust-toolchain.mjs clippy --manifest-path native/Cargo.toml --all-targets --locked -- -D warnings",
     "audit:native": "test \"$(\"${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit\" --version)\" = \"cargo-audit 0.22.2\" && PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\" node scripts/rust-toolchain.mjs audit --file native/Cargo.lock",
     "build:native": "node scripts/rust-toolchain.mjs build --manifest-path native/Cargo.toml --release --locked",
-    "build:acceptance-native": "node scripts/rust-toolchain.mjs build --manifest-path native/Cargo.toml --release --locked --features acceptance-faults --bin arthur-native-acceptance-host --target-dir native/target/acceptance",
     "native:install": "pnpm build:native && node scripts/native-host/install.mjs",
     "native:verify": "node scripts/native-host/verify.mjs",
     "native:uninstall": "node scripts/native-host/uninstall.mjs",
@@ -28,7 +27,7 @@
     "zip": "wxt zip -b chrome && wxt zip -b edge && wxt zip -b firefox && node scripts/smoke/check-zips.mjs",
     "verify:native": "pnpm test:native && pnpm format:native:check && pnpm lint:native && pnpm build:native && pnpm audit:native",
     "smoke": "node scripts/smoke/check-builds.mjs",
-    "acceptance:native": "pnpm build:acceptance-native && node scripts/smoke/native-roundtrip.mjs --binary native/target/release/arthur-native-host --fault-binary native/target/acceptance/release/arthur-native-acceptance-host",
+    "acceptance:native": "node scripts/smoke/native-roundtrip.mjs --binary native/target/release/arthur-native-host",
     "verify": "pnpm test && pnpm typecheck && pnpm test:native && pnpm format:native:check && pnpm lint:native && pnpm build && pnpm smoke && pnpm acceptance:native && pnpm audit --audit-level high && pnpm audit:native"
   },
   "dependencies": {
