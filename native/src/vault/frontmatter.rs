@@ -1,4 +1,7 @@
-use super::{VaultError, fs, names::normalize_source};
+use super::{
+    VaultError, fs,
+    names::{normalize_source, validate_basename},
+};
 use std::os::fd::OwnedFd;
 
 const MAX_FRONTMATTER_BYTES: usize = 64 * 1024;
@@ -61,6 +64,29 @@ pub(super) fn find_existing_article(
     }
     Ok(None)
 }
+
+pub(super) fn verifies_existing_article_source(
+    destination: &OwnedFd,
+    name: &str,
+    incoming_source: &str,
+) -> Result<bool, VaultError> {
+    validate_basename(name)?;
+    if !name.ends_with(".md") {
+        return Ok(false);
+    }
+    let incoming_source = normalize_source(incoming_source)?;
+    let bytes = fs::read_regular_prefix(destination, name, MAX_FRONTMATTER_BYTES)?;
+    let Some(bytes) = bytes else {
+        return Ok(false);
+    };
+    let Ok(contents) = std::str::from_utf8(&bytes) else {
+        return Ok(false);
+    };
+    let Some(stored_source) = source_from_arthur_frontmatter(contents) else {
+        return Ok(false);
+    };
+    Ok(normalize_source(&stored_source).is_ok_and(|source| source == incoming_source))
+}
 #[allow(dead_code)]
 pub(super) fn serialize_note(
     title: &str,
@@ -71,6 +97,7 @@ pub(super) fn serialize_note(
         return Err(VaultError::InvalidName);
     }
     let source = normalize_source(source)?;
+    let markdown = markdown.replace("\r\n", "\n").replace('\r', "\n");
     Ok(format!(
         "---\ntitle: {}\nsource: {}\n---\n\n{}",
         serde_json::to_string(title).map_err(|_| VaultError::InvalidName)?,

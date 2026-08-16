@@ -407,6 +407,26 @@ pub fn parse_client(value: serde_json::Value) -> Result<ClientMessage, ProtocolE
     validate_client(&mut message)?;
     Ok(message)
 }
+
+/// Identifies only a structurally valid hello whose otherwise-valid protocol
+/// version is unsupported. `parse_client` intentionally remains strict so its
+/// behavior stays aligned with the browser contract; the stream dispatcher
+/// uses this narrow classifier to return the requested typed negotiation error.
+pub(crate) fn unsupported_hello(value: &serde_json::Value) -> Option<(String, u64)> {
+    let object = value.as_object()?;
+    if object.len() != 3
+        || object.get("type")?.as_str()? != "hello"
+        || !object.contains_key("requestId")
+        || !object.contains_key("protocolVersion")
+    {
+        return None;
+    }
+    let mut request_id = object.get("requestId")?.as_str()?.to_owned();
+    let protocol_version = object.get("protocolVersion")?.as_u64()?;
+    (bounded(&mut request_id, 128) && js_safe_integer(protocol_version) && protocol_version != 1)
+        .then_some((request_id, protocol_version))
+}
+
 pub fn parse_host(value: serde_json::Value) -> Result<HostMessage, ProtocolError> {
     if value.as_object().is_some_and(|object| {
         ["requestId", "sessionId", "mediaId", "sequence"]

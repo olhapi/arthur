@@ -1,6 +1,9 @@
 mod frontmatter;
 mod fs;
 mod names;
+mod transaction;
+
+pub use transaction::{MediaDisposition, MediaSpec, SaveSpec, SavedNote, VaultTransaction};
 
 use std::{
     os::fd::OwnedFd,
@@ -16,9 +19,11 @@ pub enum VaultError {
     InvalidName,
     InvalidSource,
     InvalidTransition,
+    InvalidChunk,
     MediaLimitExceeded,
     AttachmentConflict,
     UnresolvedPlaceholder,
+    Busy,
     Io,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +49,7 @@ impl Vault {
             return Err(VaultError::NotDirectory);
         }
         let destination = fs::open_destination(&canonical_destination)?;
+        transaction::remove_stale_stages(&destination)?;
         let attachments = fs::open_or_create_child_directory(&destination, "attachments")?;
         Ok(Self {
             destination,
@@ -58,5 +64,8 @@ impl Vault {
             canonical_destination: vault.canonical_destination.clone(),
             writable: true,
         })
+    }
+    pub fn begin(self, spec: SaveSpec) -> Result<VaultTransaction, VaultError> {
+        VaultTransaction::new(self, spec)
     }
 }
