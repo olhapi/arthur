@@ -1,7 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { MEDIA_LIMITS, NATIVE_CHUNK_BYTES } from "../shared/constants.js";
-import { NativeClient, NativeDisconnectedError, type NativePortAdapter } from "./native-client.js";
+import {
+  NativeClient,
+  NativeDisconnectedError,
+  NativeLimitError,
+  type NativePortAdapter,
+} from "./native-client.js";
 import { preflightMedia, transferMedia, type PreparedMedia } from "./media-transfer.js";
 
 const SESSION_ID = "a5a74c85-92de-4a5d-9768-4e66c4d64987";
@@ -132,6 +137,27 @@ async function activeClient(port: TransferPort, options?: ConstructorParameters<
 
 async function settle(): Promise<void> {
   for (let index = 0; index < 10; index += 1) await Promise.resolve();
+}
+
+function trackReaderReleases(body: ReadableStream<Uint8Array>): () => number {
+  const getReader = body.getReader.bind(body);
+  let releases = 0;
+  Object.defineProperty(body, "getReader", {
+    configurable: true,
+    value: () => {
+      const reader = getReader();
+      const releaseLock = reader.releaseLock.bind(reader);
+      Object.defineProperty(reader, "releaseLock", {
+        configurable: true,
+        value: () => {
+          releases += 1;
+          releaseLock();
+        },
+      });
+      return reader;
+    },
+  });
+  return () => releases;
 }
 
 describe("preflightMedia", () => {
@@ -328,6 +354,99 @@ describe("transferMedia", () => {
     expect(cancelled).toBe(true);
     expect(body.locked).toBe(false);
     expect(port.posted.some((message) => message.type === "media_chunk" || message.type === "end_media")).toBe(false);
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "interrupts pending nonterminal cancellation on disconnect and handles a late cancel %s",
+    async (lateSettlement) => {
+      const port = new TransferPort();
+      const client = await activeClient(port, {
+        limits: { image: 1, audio: NATIVE_CHUNK_BYTES, video: NATIVE_CHUNK_BYTES, total: NATIVE_CHUNK_BYTES },
+      });
+      const addTerminalListener = vi.spyOn(client.terminalSignal, "addEventListener");
+      const removeTerminalListener = vi.spyOn(client.terminalSignal, "removeEventListener");
+      let resolveCancellation: (() => void) | undefined;
+      let rejectCancellation: ((error: Error) => void) | undefined;
+      const cancellation = new Promise<void>((resolve, reject) => {
+        resolveCancellation = resolve;
+        rejectCancellation = reject;
+      });
+      let markCancelStarted: (() => void) | undefined;
+      const cancelStarted = new Promise<void>((resolve) => {
+        markCancelStarted = resolve;
+      });
+      let cancellations = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(NATIVE_CHUNK_BYTES));
+        },
+        cancel() {
+          cancellations += 1;
+          markCancelStarted?.();
+          return cancellation;
+        },
+      });
+      const releaseCount = trackReaderReleases(body);
+      let failure: unknown;
+      let transferSettled = false;
+      void transferMedia(prepared(new Response(body)), client).catch((error: unknown) => {
+        failure = error;
+        transferSettled = true;
+      });
+      await cancelStarted;
+
+      port.onDisconnect.emit(undefined);
+      await settle();
+
+      expect(transferSettled).toBe(true);
+      expect(failure).toBeInstanceOf(NativeDisconnectedError);
+      expect(cancellations).toBe(1);
+      expect(releaseCount()).toBe(1);
+      expect(body.locked).toBe(false);
+      expect(port.posted.some((message) => message.type === "media_chunk" || message.type === "end_media")).toBe(false);
+      const addedAbortListeners = addTerminalListener.mock.calls
+        .filter(([type]) => type === "abort")
+        .map(([, listener]) => listener);
+      const removedAbortListeners = removeTerminalListener.mock.calls
+        .filter(([type]) => type === "abort")
+        .map(([, listener]) => listener);
+      expect(addedAbortListeners.length).toBeGreaterThan(0);
+      expect(addedAbortListeners.every((listener) => removedAbortListeners.includes(listener))).toBe(true);
+
+      if (lateSettlement === "resolve") resolveCancellation?.();
+      else rejectCancellation?.(new Error("late cancellation failure"));
+      await settle();
+      expect(releaseCount()).toBe(1);
+    },
+  );
+
+  it("preserves the original nonterminal failure when cancellation rejects before disconnect", async () => {
+    const port = new TransferPort();
+    const client = await activeClient(port, {
+      limits: { image: 1, audio: NATIVE_CHUNK_BYTES, video: NATIVE_CHUNK_BYTES, total: NATIVE_CHUNK_BYTES },
+    });
+    let cancellations = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(NATIVE_CHUNK_BYTES));
+      },
+      cancel() {
+        cancellations += 1;
+        return Promise.reject(new Error("cancellation failed"));
+      },
+    });
+    const releaseCount = trackReaderReleases(body);
+
+    await expect(transferMedia(prepared(new Response(body)), client)).rejects.toBeInstanceOf(NativeLimitError);
+    expect(cancellations).toBe(1);
+    expect(releaseCount()).toBe(1);
+    expect(body.locked).toBe(false);
+    expect(port.posted.filter((message) => message.type === "media_chunk")).toEqual([]);
+    expect(port.posted.find((message) => message.type === "end_media")).toMatchObject({
+      chunks: Number.MAX_SAFE_INTEGER,
+    });
+
+    port.onDisconnect.emit(undefined);
   });
 
   it("enforces an unknown-length individual budget incrementally", async () => {

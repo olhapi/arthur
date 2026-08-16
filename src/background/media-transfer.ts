@@ -128,10 +128,7 @@ function throwIfTerminal(signal: AbortSignal): void {
   if (signal.aborted) throw terminalReason(signal);
 }
 
-function readWithTerminal(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  signal: AbortSignal,
-): Promise<ReadableStreamReadResult<Uint8Array>> {
+function raceWithTerminal<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(terminalReason(signal));
 
   return new Promise((resolve, reject) => {
@@ -146,7 +143,7 @@ function readWithTerminal(
     signal.addEventListener("abort", onAbort, { once: true });
 
     try {
-      void reader.read().then(
+      void operation().then(
         (result) => finish(() => {
           if (signal.aborted) reject(terminalReason(signal));
           else resolve(result);
@@ -159,6 +156,21 @@ function readWithTerminal(
   });
 }
 
+function cancelWithTerminal(reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal): Promise<void> {
+  let cancellation: Promise<void>;
+  try {
+    cancellation = reader.cancel();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+
+  if (signal.aborted) {
+    void cancellation.catch(() => undefined);
+    return Promise.reject(terminalReason(signal));
+  }
+  return raceWithTerminal(() => cancellation, signal);
+}
+
 async function streamChunks(response: Response, client: NativeClient, mediaId: string): Promise<number> {
   const body = response.body;
   if (body === null) return 0;
@@ -168,7 +180,7 @@ async function streamChunks(response: Response, client: NativeClient, mediaId: s
 
   try {
     while (true) {
-      const { done, value } = await readWithTerminal(reader, client.terminalSignal);
+      const { done, value } = await raceWithTerminal(() => reader.read(), client.terminalSignal);
       throwIfTerminal(client.terminalSignal);
       if (done) break;
       if (value === undefined || value.byteLength === 0) continue;
@@ -206,13 +218,12 @@ async function streamChunks(response: Response, client: NativeClient, mediaId: s
     return sequence;
   } catch (error) {
     try {
-      const cancellation = reader.cancel();
-      if (client.terminalSignal.aborted) void cancellation.catch(() => undefined);
-      else await cancellation;
+      await cancelWithTerminal(reader, client.terminalSignal);
     } catch {
       // The original transfer error remains authoritative if cancellation
       // races a network failure or an already-closed response stream.
     }
+    throwIfTerminal(client.terminalSignal);
     throw error;
   } finally {
     reader.releaseLock();
