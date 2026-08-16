@@ -18,6 +18,12 @@ pub(super) const OLD_BACKUP: &str = "old-backup";
 const MAX_JOURNAL_BYTES: usize = 1024 * 1024;
 const WORKSPACE_MARKER: &[u8] = b"arthur-workspace-owner-v1\nslots=4\nmedia=4096\n";
 
+#[cfg(test)]
+thread_local! {
+    static INJECTED_SLOT_INSPECTION_ERROR: std::cell::RefCell<Option<(usize, VaultError)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum JournalPhase {
@@ -416,6 +422,20 @@ fn open_slot(
     destination: &OwnedFd,
     index: usize,
 ) -> Result<Slot, VaultError> {
+    #[cfg(test)]
+    if let Some(error) = INJECTED_SLOT_INSPECTION_ERROR.with(|injected| {
+        let mut injected = injected.borrow_mut();
+        if injected
+            .as_ref()
+            .is_some_and(|(injected_index, _)| *injected_index == index)
+        {
+            injected.take().map(|(_, error)| error)
+        } else {
+            None
+        }
+    }) {
+        return Err(error);
+    }
     let directory = fs::open_child_directory(workspace, &slot_name(index))?;
     if !fs::child_directory_matches(workspace, &slot_name(index), &directory)? {
         return Err(VaultError::UnsafeChild);
@@ -536,8 +556,10 @@ impl Workspace {
         // inspection pass.
         let mut inspected = Vec::with_capacity(SLOT_COUNT);
         for index in 0..SLOT_COUNT {
-            if let Ok(slot) = open_slot(&directory, &owner, destination, index) {
-                inspected.push(slot);
+            match open_slot(&directory, &owner, destination, index) {
+                Ok(slot) => inspected.push(slot),
+                Err(VaultError::UnsafeChild) => {}
+                Err(error) => return Err(error),
             }
         }
         let slots = inspected
@@ -1134,6 +1156,7 @@ mod tests {
     use super::*;
     use std::{
         fs as stdfs,
+        os::unix::fs::MetadataExt,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -1158,6 +1181,12 @@ mod tests {
                 return candidate;
             }
         }
+    }
+
+    fn inject_slot_inspection_error(index: usize, error: VaultError) {
+        INJECTED_SLOT_INSPECTION_ERROR.with(|injected| {
+            assert!(injected.replace(Some((index, error))).is_none());
+        });
     }
 
     #[test]
@@ -1366,6 +1395,70 @@ mod tests {
         assert_eq!(stdfs::read(&later_owner).unwrap(), b"later substitute");
 
         drop(next);
+        drop(destination);
+        stdfs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn later_io_inspection_error_propagates_before_earlier_recovery_mutates_any_path() {
+        let path = temp();
+        let destination = fs::open_destination(&path).unwrap();
+        let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
+        slot.begin().unwrap();
+        let target = path.join("Article.md");
+        let displaced = path.join("displaced-article");
+        let slot_path = path.join(WORKSPACE_NAME).join("slot-0");
+        let backup_path = slot_path.join(OLD_BACKUP);
+        let new_note_path = slot_path.join(NEW_NOTE);
+        stdfs::write(&target, b"old").unwrap();
+        let old = fs::fingerprint_regular_file(&destination, "Article.md").unwrap();
+        let new = slot.write_new_note(b"new").unwrap();
+        let mut source = fs::open_regular_file(&destination, "Article.md").unwrap();
+        let backup = slot.copy_old_note(&mut source).unwrap();
+        slot.persist(
+            JournalPhase::ExchangePending,
+            Some("Article.md".to_owned()),
+            Some(old),
+            Some(backup),
+            Some(new),
+        )
+        .unwrap();
+        stdfs::rename(&target, &displaced).unwrap();
+        stdfs::write(&target, b"unrelated target").unwrap();
+
+        let target_before = stdfs::read(&target).unwrap();
+        let target_metadata_before = stdfs::metadata(&target).unwrap();
+        let backup_before = stdfs::read(&backup_path).unwrap();
+        let backup_metadata_before = stdfs::metadata(&backup_path).unwrap();
+        let new_note_before = stdfs::read(&new_note_path).unwrap();
+        let journal_a_before = stdfs::read(slot_path.join(JOURNAL_A)).unwrap();
+        let journal_b_before = stdfs::read(slot_path.join(JOURNAL_B)).unwrap();
+        drop(source);
+        drop(slot);
+        drop(destination);
+
+        inject_slot_inspection_error(3, VaultError::Io);
+        let destination = fs::open_destination(&path).unwrap();
+        assert_eq!(Workspace::open(&destination).err(), Some(VaultError::Io));
+
+        let target_metadata_after = stdfs::metadata(&target).unwrap();
+        let backup_metadata_after = stdfs::metadata(&backup_path).unwrap();
+        assert_eq!(stdfs::read(&target).unwrap(), target_before);
+        assert_eq!(target_metadata_after.dev(), target_metadata_before.dev());
+        assert_eq!(target_metadata_after.ino(), target_metadata_before.ino());
+        assert_eq!(stdfs::read(&backup_path).unwrap(), backup_before);
+        assert_eq!(backup_metadata_after.dev(), backup_metadata_before.dev());
+        assert_eq!(backup_metadata_after.ino(), backup_metadata_before.ino());
+        assert_eq!(stdfs::read(&new_note_path).unwrap(), new_note_before);
+        assert_eq!(
+            stdfs::read(slot_path.join(JOURNAL_A)).unwrap(),
+            journal_a_before
+        );
+        assert_eq!(
+            stdfs::read(slot_path.join(JOURNAL_B)).unwrap(),
+            journal_b_before
+        );
+
         drop(destination);
         stdfs::remove_dir_all(path).unwrap();
     }
