@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Arthur settings</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Arthur settings</h1>
+      <form id="options-form">
+        <label for="destination">Destination folder</label>
+        <input id="destination" name="destination" type="text" autocomplete="off" required />
+        <button type="submit">Save settings</button>
+      </form>
+      <button id="test-connection" type="button">Test connection</button>
+      <p id="host-status" aria-live="polite">Native host not checked.</p>
+      <p id="folder-status" aria-live="polite">Folder not checked.</p>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

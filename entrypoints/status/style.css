@@ -1,0 +1,28 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 30rem;
+  padding: 1rem;
+}
+
+h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.1rem;
+}
+
+ul {
+  margin: 0;
+  padding-inline-start: 1.3rem;
+}
+
+:focus-visible {
+  outline: 3px solid Highlight;
+  outline-offset: 2px;
+}

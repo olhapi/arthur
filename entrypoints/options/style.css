@@ -1,0 +1,48 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  display: grid;
+  gap: 0.9rem;
+  max-width: 42rem;
+  padding: 1.5rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+form {
+  display: grid;
+  gap: 0.5rem;
+}
+
+input,
+button {
+  font: inherit;
+}
+
+input {
+  padding: 0.5rem;
+}
+
+button {
+  justify-self: start;
+  padding: 0.45rem 0.7rem;
+}
+
+:focus-visible {
+  outline: 3px solid Highlight;
+  outline-offset: 2px;
+}
+
+[data-kind="error"] {
+  color: #b42318;
+}
