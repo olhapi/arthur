@@ -123,7 +123,7 @@ pub struct VaultTransaction {
     next_media: usize,
     total_bytes: u64,
     declared_total: u64,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "acceptance-faults"))]
     commit_fault: Option<CommitFault>,
     #[cfg(test)]
     partial_write_after: Option<usize>,
@@ -233,7 +233,7 @@ impl VaultTransaction {
             next_media: 0,
             total_bytes: 0,
             declared_total: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "acceptance-faults"))]
             commit_fault: None,
             #[cfg(test)]
             partial_write_after: None,
@@ -1021,11 +1021,11 @@ impl VaultTransaction {
     }
 
     fn fault_before_note_rename(&self) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "acceptance-faults"))]
         {
             matches!(self.commit_fault, Some(CommitFault::BeforeNoteRename))
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "acceptance-faults")))]
         false
     }
 
@@ -1219,7 +1219,7 @@ impl Drop for VaultTransaction {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "acceptance-faults"))]
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum CommitFault {
@@ -1264,6 +1264,14 @@ impl VaultTransaction {
     ) -> Result<SavedNote, VaultError> {
         self.commit_fault = Some(CommitFault::ReplaceSourceWithSymlinkBeforeExchange);
         self.source_replacement_target = Some(outside);
+        self.commit()
+    }
+}
+
+#[cfg(feature = "acceptance-faults")]
+impl VaultTransaction {
+    pub fn commit_before_note_rename_for_acceptance(mut self) -> Result<SavedNote, VaultError> {
+        self.commit_fault = Some(CommitFault::BeforeNoteRename);
         self.commit()
     }
 }

@@ -2,11 +2,13 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { CHROMIUM_EXTENSION_ID, CHROMIUM_PUBLIC_KEY_DER_BASE64, getChromiumExtensionId } from "../native-host/identity.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const TARGETS = [
-  ["chrome", "chrome-mv3", 3],
-  ["edge", "edge-mv3", 3],
-  ["firefox", "firefox-mv2", 2],
+  { name: "chrome", directory: "chrome-mv3", manifestVersion: 3, chromium: true },
+  { name: "edge", directory: "edge-mv3", manifestVersion: 3, chromium: true },
+  { name: "firefox", directory: "firefox-mv2", manifestVersion: 2, chromium: false },
 ];
 const REQUIRED_PERMISSIONS = ["activeTab", "storage", "nativeMessaging"];
 const MATCHES = ["http://*/*", "https://*/*"];
@@ -25,42 +27,47 @@ function assertFile(root, relative, label) {
   });
 }
 
-function validateManifest(manifest, target, version) {
-  if (manifest.manifest_version !== version || manifest.name !== "arthur" || manifest.version !== "0.1.0") {
-    fail(`${target} manifest identity is invalid.`);
+function validateManifest(manifest, target) {
+  if (manifest.manifest_version !== target.manifestVersion || manifest.name !== "arthur" || manifest.version !== "0.1.0") {
+    fail(`${target.name} manifest identity is invalid.`);
   }
-  exactArray(manifest.permissions, version === 3 ? REQUIRED_PERMISSIONS : [...REQUIRED_PERMISSIONS, ...MATCHES], `${target} permissions`);
-  if (version === 3) exactArray(manifest.host_permissions, MATCHES, `${target} host permissions`);
+  exactArray(manifest.permissions, target.manifestVersion === 3 ? REQUIRED_PERMISSIONS : [...REQUIRED_PERMISSIONS, ...MATCHES], `${target.name} permissions`);
+  if (target.chromium) {
+    exactArray(manifest.host_permissions, MATCHES, `${target.name} host permissions`);
+    if (manifest.key !== CHROMIUM_PUBLIC_KEY_DER_BASE64 || getChromiumExtensionId(manifest.key) !== CHROMIUM_EXTENSION_ID) {
+      fail(`${target.name} manifest key does not produce Arthur's fixed Chromium identity.`);
+    }
+  }
   const gecko = manifest.browser_specific_settings?.gecko;
-  if (!gecko || gecko.id !== "arthur@olhapi.com") fail(`${target} Gecko identity is missing.`);
-  if (manifest.options_ui?.page !== "options.html" || manifest.options_ui?.open_in_tab !== false) fail(`${target} options page is invalid.`);
-  if (!Array.isArray(manifest.content_scripts) || manifest.content_scripts.length !== 1) fail(`${target} content script is missing.`);
+  if (!gecko || gecko.id !== "arthur@olhapi.com") fail(`${target.name} Gecko identity is missing.`);
+  if (manifest.options_ui?.page !== "options.html" || manifest.options_ui?.open_in_tab !== false) fail(`${target.name} options page is invalid.`);
+  if (!Array.isArray(manifest.content_scripts) || manifest.content_scripts.length !== 1) fail(`${target.name} content script is missing.`);
   const content = manifest.content_scripts[0];
-  exactArray(content.matches, MATCHES, `${target} content-script matches`);
-  exactArray(content.js, ["content-scripts/content.js"], `${target} content-script entries`);
-  if (version === 3) {
-    if (manifest.background?.service_worker !== "background.js") fail(`${target} service worker is invalid.`);
-    if (!manifest.action || Object.hasOwn(manifest.action, "default_popup")) fail(`${target} must not declare a default action popup.`);
+  exactArray(content.matches, MATCHES, `${target.name} content-script matches`);
+  exactArray(content.js, ["content-scripts/content.js"], `${target.name} content-script entries`);
+  if (target.manifestVersion === 3) {
+    if (manifest.background?.service_worker !== "background.js") fail(`${target.name} service worker is invalid.`);
+    if (!manifest.action || Object.hasOwn(manifest.action, "default_popup")) fail(`${target.name} must not declare a default action popup.`);
   } else {
-    exactArray(manifest.background?.scripts, ["background.js"], `${target} background scripts`);
-    if (!manifest.browser_action || Object.hasOwn(manifest.browser_action, "default_popup")) fail(`${target} must not declare a default browser-action popup.`);
+    exactArray(manifest.background?.scripts, ["background.js"], `${target.name} background scripts`);
+    if (!manifest.browser_action || Object.hasOwn(manifest.browser_action, "default_popup")) fail(`${target.name} must not declare a default browser-action popup.`);
   }
 }
 
 export async function validateBuildArtifacts({ root = path.join(ROOT, ".output") } = {}) {
   const canonicalRoot = path.resolve(root);
   const targets = [];
-  for (const [target, directory, version] of TARGETS) {
-    const artifact = path.join(canonicalRoot, directory);
+  for (const target of TARGETS) {
+    const artifact = path.join(canonicalRoot, target.directory);
     const manifest = JSON.parse(await fs.readFile(path.join(artifact, "manifest.json"), "utf8"));
-    validateManifest(manifest, target, version);
+    validateManifest(manifest, target);
     await Promise.all([
-      assertFile(artifact, "background.js", `${target} background entrypoint`),
-      assertFile(artifact, "content-scripts/content.js", `${target} content-script entrypoint`),
-      assertFile(artifact, "options.html", `${target} options page`),
-      assertFile(artifact, "status.html", `${target} status page`),
+      assertFile(artifact, "background.js", `${target.name} background entrypoint`),
+      assertFile(artifact, "content-scripts/content.js", `${target.name} content-script entrypoint`),
+      assertFile(artifact, "options.html", `${target.name} options page`),
+      assertFile(artifact, "status.html", `${target.name} status page`),
     ]);
-    targets.push(target);
+    targets.push(target.name);
   }
   return { smoke: "build-artifacts", targets };
 }

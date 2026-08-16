@@ -3,6 +3,19 @@ import { defineConfig } from "wxt";
 import { CHROMIUM_PUBLIC_KEY_DER_BASE64 } from "./scripts/native-host/identity.mjs";
 
 export default defineConfig({
+  zip: {
+    excludeSources: [
+      "native/target/**",
+      "native/src/bin/arthur-native-acceptance-host.rs",
+      "node_modules/**",
+      ".output/**",
+      ".wxt/**",
+      "coverage/**",
+      "dist/**",
+      ".turbo/**",
+      "**/*.zip",
+    ],
+  },
   hooks: {
     // WXT discovers every TypeScript file beneath entrypoints. Keep the
     // required co-located Vitest files out of the packaged extension.

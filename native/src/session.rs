@@ -12,6 +12,8 @@ const CHUNK_BYTES: usize = 256 * 1024;
 
 pub struct SessionManager {
     sessions: HashMap<String, VaultTransaction>,
+    #[cfg(feature = "acceptance-faults")]
+    before_note_rename_fault: bool,
 }
 
 impl Default for SessionManager {
@@ -24,6 +26,16 @@ impl SessionManager {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            #[cfg(feature = "acceptance-faults")]
+            before_note_rename_fault: false,
+        }
+    }
+
+    #[cfg(feature = "acceptance-faults")]
+    pub fn with_before_note_rename_fault() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            before_note_rename_fault: true,
         }
     }
 
@@ -187,7 +199,15 @@ impl SessionManager {
                 let Some(transaction) = self.sessions.remove(&session_id) else {
                     return missing_session(Some(request_id), session_id);
                 };
-                match transaction.commit() {
+                #[cfg(feature = "acceptance-faults")]
+                let committed = if self.before_note_rename_fault {
+                    transaction.commit_before_note_rename_for_acceptance()
+                } else {
+                    transaction.commit()
+                };
+                #[cfg(not(feature = "acceptance-faults"))]
+                let committed = transaction.commit();
+                match committed {
                     Ok(saved) => HostMessage::SaveResult {
                         request_id,
                         session_id,

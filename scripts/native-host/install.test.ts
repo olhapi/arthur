@@ -47,10 +47,16 @@ describe("native-host installation plan", () => {
     await symlink("/tmp/not-arthur", installed);
     await expect(buildInstallPlan({ ...clean, platform: "darwin" })).rejects.toThrow(/symlink/i);
     await expect(buildInstallPlan({ ...clean, platform: "darwin", targets: { binary: "/tmp/escape" } })).rejects.toThrow(/allowlist/i);
-    await expect(buildInstallPlan({ ...clean, nativeBinaryPath: path.join(clean.repositoryPath, "missing"), platform: "darwin" })).rejects.toThrow(/missing/i);
-    const sourceLink = path.join(clean.repositoryPath, "source-link");
+    await expect(buildInstallPlan({ ...clean, nativeBinaryPath: path.join(clean.repositoryPath, "missing", "arthur-native-host"), platform: "darwin" })).rejects.toThrow(/missing/i);
+    const sourceLink = path.join(clean.repositoryPath, "linked", "arthur-native-host");
+    await mkdir(path.dirname(sourceLink));
     await symlink(clean.nativeBinaryPath, sourceLink);
     await expect(buildInstallPlan({ ...clean, nativeBinaryPath: sourceLink, platform: "darwin" })).rejects.toThrow(/symlink/i);
+    const acceptance = await fixture();
+    const acceptanceBinary = path.join(acceptance.repositoryPath, "native", "target", "acceptance", "release", "arthur-native-acceptance-host");
+    await mkdir(path.dirname(acceptanceBinary), { recursive: true });
+    await writeFile(acceptanceBinary, "acceptance-only");
+    await expect(buildInstallPlan({ ...acceptance, nativeBinaryPath: acceptanceBinary, platform: "darwin" })).rejects.toThrow(/release native binary|arthur-native-host/i);
   });
 
   it("atomically installs only the binary and browser manifests", async () => {

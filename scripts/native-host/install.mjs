@@ -104,6 +104,7 @@ export async function buildInstallPlan({
   const source = nativeBinaryPath === undefined
     ? path.join(repository ?? "", "native", "target", "release", "arthur-native-host")
     : requiredAbsolute(nativeBinaryPath, "nativeBinaryPath");
+  if (path.basename(source) !== "arthur-native-host") throw new Error("Release native binary must be named arthur-native-host.");
   if (!(await assertRegularNonSymlink(fs, source, "Release native binary"))) {
     throw new Error("Release native binary is missing.");
   }

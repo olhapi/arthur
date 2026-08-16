@@ -46,6 +46,19 @@ fn run(input: &[u8]) -> Output {
     child.wait_with_output().unwrap()
 }
 
+fn run_with_environment(input: &[u8], key: &str, value: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_arthur-native-host"))
+        .env(key, value)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(input).unwrap();
+    child.stdin.take();
+    child.wait_with_output().unwrap()
+}
+
 fn decode_stdout(bytes: &[u8]) -> Vec<HostMessage> {
     let mut offset = 0;
     let mut messages = Vec::new();
@@ -123,6 +136,30 @@ fn valid_hello_writes_one_valid_response_and_no_diagnostics() {
     };
     assert_eq!(request_id, "hello");
     assert_eq!(*protocol_version, 1);
+}
+
+#[test]
+fn default_host_has_no_environment_trigger_for_acceptance_faults() {
+    let destination = temp();
+    let input = [
+        begin_save_request(&destination, SESSION, "begin", "new"),
+        request(serde_json::json!({
+            "type":"commit_save", "requestId":"commit", "sessionId":SESSION
+        })),
+    ]
+    .concat();
+    let output = run_with_environment(&input, "ARTHUR_ACCEPTANCE_FAULT", "before_note_rename");
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(matches!(
+        decode_stdout(&output.stdout).last(),
+        Some(HostMessage::SaveResult { .. })
+    ));
+    assert_eq!(
+        fs::read_to_string(destination.join("Article.md")).unwrap(),
+        "---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nnew"
+    );
+    fs::remove_dir_all(destination).unwrap();
 }
 
 #[test]

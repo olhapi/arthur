@@ -8,12 +8,34 @@ use std::io::{self, Read, Write};
 const READ_BUFFER_BYTES: usize = 16 * 1024;
 
 pub fn run_native_host<R: Read, W: Write, E: Write>(
+    input: R,
+    output: W,
+    diagnostics: E,
+) -> io::Result<()> {
+    run_native_host_with_sessions(input, output, diagnostics, SessionManager::new())
+}
+
+#[cfg(feature = "acceptance-faults")]
+pub fn run_native_host_before_note_rename_fault<R: Read, W: Write, E: Write>(
+    input: R,
+    output: W,
+    diagnostics: E,
+) -> io::Result<()> {
+    run_native_host_with_sessions(
+        input,
+        output,
+        diagnostics,
+        SessionManager::with_before_note_rename_fault(),
+    )
+}
+
+fn run_native_host_with_sessions<R: Read, W: Write, E: Write>(
     mut input: R,
     mut output: W,
     mut diagnostics: E,
+    mut sessions: SessionManager,
 ) -> io::Result<()> {
     let mut decoder = FrameDecoder::new();
-    let mut sessions = SessionManager::new();
     let mut buffer = [0u8; READ_BUFFER_BYTES];
     let result = 'host: loop {
         let read = match input.read(&mut buffer) {

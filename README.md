@@ -45,7 +45,9 @@ pnpm verify
 pnpm zip
 ```
 
-`pnpm verify` runs TypeScript and Rust tests, format/lint checks, locked release builds, deterministic artifact smoke, the real release-binary native roundtrip, and both audits. `pnpm zip` creates Chrome, Edge, and Firefox archives. See [docs/acceptance.md](docs/acceptance.md) for exact automated and manual evidence.
+`pnpm verify` runs TypeScript and Rust tests, format/lint checks, locked release builds, deterministic artifact smoke, the real release-binary native roundtrip, and both audits. The roundtrip uses committed, offline-decodable media and reports each exact input/output SHA-256 pair. Its pre-note-rename test builds a separate `acceptance-faults` binary in `native/target/acceptance`; that test-only binary cannot be installed and is excluded from packages. The default and installed host have no fault trigger or acceptance code path.
+
+`pnpm zip` creates Chrome, Edge, and Firefox archives, then rejects a WXT source archive above 10 MiB or 500 entries and rejects native targets, dependencies, build outputs, and caches. See [docs/acceptance.md](docs/acceptance.md) for exact automated and manual evidence.
 
 To remove only Arthur-owned host files:
 
