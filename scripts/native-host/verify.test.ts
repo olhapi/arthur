@@ -6,7 +6,7 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 
 import { applyInstallPlan, buildInstallPlan } from "./install.mjs";
-import { requestHost, verifyInstall } from "./verify.mjs";
+import { parseArguments, requestHost, verifyInstall } from "./verify.mjs";
 
 function frame(value: unknown) {
   const json = Buffer.from(JSON.stringify(value));
@@ -48,6 +48,11 @@ async function installedFixture() {
 }
 
 describe("native-host verification", () => {
+  it("accepts pnpm's delimiter before native verification arguments", () => {
+    expect(parseArguments(["--", "--destination", "/tmp/arthur"])).toEqual({ destination: "/tmp/arthur" });
+    expect(parseArguments(["--", "--expect-absent"])).toEqual({ expectAbsent: true });
+  });
+
   it("directly spawns the installed binary with minimal PATH and validates hello", async () => {
     const { home, plan } = await installedFixture();
     const spawn = spawning({ type: "hello_result", requestId: "verify-hello", protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" });

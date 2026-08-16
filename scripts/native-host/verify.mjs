@@ -145,7 +145,8 @@ export async function verifyInstall({ home, platform, destination, expectAbsent 
   return { installed: true, destination: normalizedDestination };
 }
 
-function parseArguments(argv) {
+export function parseArguments(argv) {
+  if (argv[0] === "--") argv = argv.slice(1);
   if (argv.length === 1 && argv[0] === "--expect-absent") return { expectAbsent: true };
   if (argv.length === 2 && argv[0] === "--destination") return { destination: argv[1] };
   if (argv.length === 0) return {};
