@@ -22,6 +22,11 @@ const MAX_REQUEST = 64 * 1024 * 1024;
 const IMAGE_LIMIT = 100 * 1024 * 1024;
 const AV_LIMIT = 2 * 1024 * 1024 * 1024;
 const TOTAL_LIMIT = 4 * 1024 * 1024 * 1024;
+const MAX_BMFF_BOXES = 4_096;
+const MAX_BMFF_DEPTH = 32;
+const MAX_MP4_SAMPLES = 1_000_000;
+const MAX_ILOC_ITEMS = 1_024;
+const MAX_ILOC_EXTENTS = 4_096;
 
 function fail(message) { throw new Error(message); }
 function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
@@ -44,6 +49,7 @@ function inspectGif(bytes) {
   if (width === 0 || height === 0) fail("animated.gif has invalid dimensions.");
   let offset = 13; let frames = 0; let duration = 0;
   if ((bytes[10] & 0x80) !== 0) offset += 3 * (1 << ((bytes[10] & 0x07) + 1));
+  if (offset > bytes.length) fail("animated.gif contains a truncated global color table.");
   while (offset < bytes.length) {
     const marker = bytes[offset]; offset += 1;
     if (marker === 0x3b) {
@@ -61,9 +67,12 @@ function inspectGif(bytes) {
       continue;
     }
     if (marker !== 0x2c || offset + 9 > bytes.length) fail("animated.gif contains an invalid image descriptor.");
-    const packed = bytes[offset + 8]; offset += 9;
+    const left = bytes.readUInt16LE(offset); const top = bytes.readUInt16LE(offset + 2);
+    const frameWidth = bytes.readUInt16LE(offset + 4); const frameHeight = bytes.readUInt16LE(offset + 6); const packed = bytes[offset + 8]; offset += 9;
+    if (frameWidth === 0 || frameHeight === 0 || left + frameWidth > width || top + frameHeight > height) fail("animated.gif contains an out-of-bounds image rectangle.");
     if ((packed & 0x80) !== 0) offset += 3 * (1 << ((packed & 0x07) + 1));
-    if (offset >= bytes.length || bytes[offset] > 11) fail("animated.gif contains invalid LZW image data.");
+    if (offset > bytes.length) fail("animated.gif contains a truncated local color table.");
+    if (offset >= bytes.length || bytes[offset] < 2 || bytes[offset] > 8) fail("animated.gif contains invalid LZW image data.");
     offset = boundedSubBlocks(bytes, offset + 1, "animated.gif"); frames += 1;
   }
   fail("animated.gif has no trailer.");
@@ -102,7 +111,15 @@ function inspectWebp(bytes) {
   return { format: "webp", width, height, frames: frames.length, duration, streams: ["image"] };
 }
 
-function bmffBoxes(bytes, start = 0, end = bytes.length, label = "media") {
+function bmffBudget(bytes, label) {
+  return { boxes: 0, work: 0, maxWork: Math.max(1_024, bytes.length * 8), label };
+}
+
+function bmffBoxes(bytes, start = 0, end = bytes.length, label = "media", budget = bmffBudget(bytes, label), depth = 0) {
+  if (depth > MAX_BMFF_DEPTH) fail(`${label} exceeds the BMFF depth budget.`);
+  if (start < 0 || end < start || end > bytes.length) fail(`${label} contains an invalid box range.`);
+  budget.work += end - start;
+  if (budget.work > budget.maxWork) fail(`${label} exceeds the BMFF work budget.`);
   const boxes = [];
   for (let offset = start; offset < end;) {
     if (offset + 8 > end) fail(`${label} contains a truncated box header.`);
@@ -113,16 +130,24 @@ function bmffBoxes(bytes, start = 0, end = bytes.length, label = "media") {
       size = Number(extended); header = 16;
     } else if (size === 0) size = end - offset;
     if (size < header || offset + size > end) fail(`${label} contains an out-of-bounds box.`);
+    budget.boxes += 1;
+    if (budget.boxes > MAX_BMFF_BOXES) fail(`${label} exceeds the BMFF box budget.`);
     boxes.push({ type, start: offset, body: offset + header, end: offset + size, size }); offset += size;
   }
   return boxes;
 }
 
-function descendants(bytes, boxes, containerTypes, label) {
-  const result = [...boxes];
-  for (const box of boxes) {
+function descendants(bytes, boxes, containerTypes, label, budget) {
+  const result = [];
+  const stack = boxes.map((box) => ({ box, depth: 0 })).reverse();
+  while (stack.length > 0) {
+    const { box, depth } = stack.pop(); result.push(box);
     const skip = box.type === "meta" ? 4 : box.type === "iinf" ? 6 : 0;
-    if (containerTypes.has(box.type) && box.body + skip <= box.end) result.push(...descendants(bytes, bmffBoxes(bytes, box.body + skip, box.end, label), containerTypes, label));
+    if (containerTypes.has(box.type) && box.body + skip <= box.end) {
+      if (depth + 1 > MAX_BMFF_DEPTH) fail(`${label} exceeds the BMFF depth budget.`);
+      const children = bmffBoxes(bytes, box.body + skip, box.end, label, budget, depth + 1);
+      for (let index = children.length - 1; index >= 0; index -= 1) stack.push({ box: children[index], depth: depth + 1 });
+    }
   }
   return result;
 }
@@ -145,8 +170,12 @@ function readSizedUInt(bytes, offset, size, end, label) {
 function ilocExtents(bytes, box) {
   const label = "photo.avif iloc"; if (!box || box.end - box.body < 8) fail(`${label} is truncated.`);
   const version = bytes[box.body]; if (version > 2) fail(`${label} has an unsupported version.`);
-  const offsetSize = bytes[box.body + 4] >>> 4; const lengthSize = bytes[box.body + 4] & 0x0f; const baseOffsetSize = bytes[box.body + 5] >>> 4; const indexSize = version === 1 || version === 2 ? bytes[box.body + 5] & 0x0f : 0;
+  if (bytes.readUIntBE(box.body + 1, 3) !== 0) fail(`${label} has unsupported flags.`);
+  const offsetSize = bytes[box.body + 4] >>> 4; const lengthSize = bytes[box.body + 4] & 0x0f; const baseOffsetSize = bytes[box.body + 5] >>> 4; const indexNibble = bytes[box.body + 5] & 0x0f; const indexSize = version === 1 || version === 2 ? indexNibble : 0;
+  const allowedSize = (size) => size === 0 || size === 4 || size === 8;
+  if (!allowedSize(offsetSize) || !allowedSize(lengthSize) || !allowedSize(baseOffsetSize) || !allowedSize(indexSize) || offsetSize === 0 || lengthSize === 0 || (version === 0 && indexNibble !== 0)) fail(`${label} has invalid field sizes.`);
   let offset = box.body + 6; const countBytes = version < 2 ? 2 : 4; let read = readSizedUInt(bytes, offset, countBytes, box.end, label); const itemCount = read.value; offset = read.offset;
+  if (itemCount === 0 || itemCount > MAX_ILOC_ITEMS || itemCount > Math.floor((box.end - offset) / 8)) fail(`${label} exceeds its item budget.`);
   const extents = [];
   for (let item = 0; item < itemCount; item += 1) {
     read = readSizedUInt(bytes, offset, version < 2 ? 2 : 4, box.end, label); offset = read.offset;
@@ -154,10 +183,13 @@ function ilocExtents(bytes, box) {
     read = readSizedUInt(bytes, offset, 2, box.end, label); offset = read.offset;
     read = readSizedUInt(bytes, offset, baseOffsetSize, box.end, label); const baseOffset = read.value; offset = read.offset;
     read = readSizedUInt(bytes, offset, 2, box.end, label); const extentCount = read.value; offset = read.offset;
+    const extentBytes = (indexSize === 0 ? 0 : indexSize) + offsetSize + lengthSize;
+    if (extentCount === 0 || extentCount > MAX_ILOC_EXTENTS - extents.length || extentCount > Math.floor((box.end - offset) / extentBytes)) fail(`${label} exceeds its extent budget.`);
     for (let extent = 0; extent < extentCount; extent += 1) {
       if (indexSize !== 0) { read = readSizedUInt(bytes, offset, indexSize, box.end, label); offset = read.offset; }
       read = readSizedUInt(bytes, offset, offsetSize, box.end, label); const extentOffset = read.value; offset = read.offset;
       read = readSizedUInt(bytes, offset, lengthSize, box.end, label); const extentLength = read.value; offset = read.offset;
+      if (!Number.isSafeInteger(baseOffset + extentOffset)) fail(`${label} contains an out-of-range extent offset.`);
       extents.push({ offset: baseOffset + extentOffset, length: extentLength });
     }
   }
@@ -166,14 +198,15 @@ function ilocExtents(bytes, box) {
 }
 
 function inspectAvif(bytes) {
-  const top = bmffBoxes(bytes, 0, bytes.length, "photo.avif"); const ftyp = top.find((box) => box.type === "ftyp");
+  const budget = bmffBudget(bytes, "photo.avif"); const top = bmffBoxes(bytes, 0, bytes.length, "photo.avif", budget); const ftyp = top.find((box) => box.type === "ftyp");
   const brands = ftypBrands(bytes, ftyp); if (!brands.some((brand) => brand === "avif" || brand === "avis")) fail("photo.avif has no AVIF compatible brand.");
   const meta = top.find((box) => box.type === "meta"); const mdat = top.find((box) => box.type === "mdat");
   if (!meta || !mdat || mdat.end <= mdat.body) fail("photo.avif has no coded image payload.");
-  const boxes = descendants(bytes, [meta], new Set(["meta", "iprp", "ipco", "iinf"]), "photo.avif");
+  const boxes = descendants(bytes, [meta], new Set(["meta", "iprp", "ipco", "iinf"]), "photo.avif", budget);
   const ispe = boxes.find((box) => box.type === "ispe");
   const codedItem = boxes.some((box) => box.type === "infe" && bytes.subarray(box.body, box.end).includes(Buffer.from("av01"))); const iloc = boxes.find((box) => box.type === "iloc");
-  const codedExtent = ilocExtents(bytes, iloc).some((extent) => extent.length > 0 && extent.offset >= mdat.body && extent.offset + extent.length <= mdat.end);
+  const extents = ilocExtents(bytes, iloc);
+  const codedExtent = extents.length > 0 && extents.every((extent) => extent.length > 0 && extent.offset >= mdat.body && extent.offset + extent.length <= mdat.end);
   if (!codedItem || !codedExtent || !boxes.some((box) => box.type === "av1C") || !ispe || ispe.end - ispe.body < 12) fail("photo.avif has no bounded AV1 coded item evidence.");
   const width = bytes.readUInt32BE(ispe.body + 4); const height = bytes.readUInt32BE(ispe.body + 8);
   if (width === 0 || height === 0) fail("photo.avif has invalid dimensions.");
@@ -213,7 +246,7 @@ function inspectMp3(bytes) {
   }
   let frames = 0; let duration = 0;
   while (offset < bytes.length) {
-    const frameInfo = mpegFrame(bytes, offset); if (!frameInfo) break;
+    const frameInfo = mpegFrame(bytes, offset); if (!frameInfo) fail("audio.mp3 contains truncated data or trailing garbage.");
     frames += 1; duration += frameInfo.samples / frameInfo.sampleRate; offset += frameInfo.length;
   }
   if (frames < 2 || duration <= 0) fail("audio.mp3 has no consecutive MPEG audio frames.");
@@ -221,18 +254,34 @@ function inspectMp3(bytes) {
 }
 
 function inspectMp4(bytes) {
-  const top = bmffBoxes(bytes, 0, bytes.length, "video.mp4"); const ftyp = top.find((box) => box.type === "ftyp"); const moov = top.find((box) => box.type === "moov"); const mdat = top.find((box) => box.type === "mdat");
+  const budget = bmffBudget(bytes, "video.mp4"); const top = bmffBoxes(bytes, 0, bytes.length, "video.mp4", budget); const ftyp = top.find((box) => box.type === "ftyp"); const moov = top.find((box) => box.type === "moov"); const mdat = top.find((box) => box.type === "mdat");
   if (!ftyp || ftypBrands(bytes, ftyp).length === 0 || !moov || !mdat || mdat.end <= mdat.body) fail("video.mp4 is missing bounded media boxes.");
-  const moovChildren = bmffBoxes(bytes, moov.body, moov.end, "video.mp4 moov"); const trak = moovChildren.find((box) => box.type === "trak"); const movie = moovChildren.find((box) => box.type === "mvhd" && box.end - box.body >= 20);
+  const moovChildren = bmffBoxes(bytes, moov.body, moov.end, "video.mp4 moov", budget, 1); const trak = moovChildren.find((box) => box.type === "trak"); const movie = moovChildren.find((box) => box.type === "mvhd" && box.end - box.body >= 20);
   if (!trak) fail("video.mp4 has no bounded trak box.");
-  const trakChildren = bmffBoxes(bytes, trak.body, trak.end, "video.mp4 trak"); const mdia = trakChildren.find((box) => box.type === "mdia"); const track = trakChildren.find((box) => box.type === "tkhd" && box.end - box.body >= 8);
+  const trakChildren = bmffBoxes(bytes, trak.body, trak.end, "video.mp4 trak", budget, 2); const mdia = trakChildren.find((box) => box.type === "mdia"); const track = trakChildren.find((box) => box.type === "tkhd" && box.end - box.body >= 8);
   if (!mdia) fail("video.mp4 has no bounded mdia box.");
-  const mediaChildren = bmffBoxes(bytes, mdia.body, mdia.end, "video.mp4 mdia");
+  const mediaChildren = bmffBoxes(bytes, mdia.body, mdia.end, "video.mp4 mdia", budget, 3);
   const videoHandler = mediaChildren.find((box) => box.type === "hdlr" && box.end - box.body >= 12 && bytes.subarray(box.body + 8, box.body + 12).toString("ascii") === "vide");
   const minf = mediaChildren.find((box) => box.type === "minf"); if (!minf) fail("video.mp4 has no bounded video media information.");
-  const stbl = bmffBoxes(bytes, minf.body, minf.end, "video.mp4 minf").find((box) => box.type === "stbl"); if (!stbl) fail("video.mp4 has no bounded sample table.");
-  const sampleSize = bmffBoxes(bytes, stbl.body, stbl.end, "video.mp4 stbl").find((box) => box.type === "stsz" && box.end - box.body >= 12);
-  const frames = sampleSize ? bytes.readUInt32BE(sampleSize.body + 8) : 0;
+  const stbl = bmffBoxes(bytes, minf.body, minf.end, "video.mp4 minf", budget, 4).find((box) => box.type === "stbl"); if (!stbl) fail("video.mp4 has no bounded sample table.");
+  const sampleSize = bmffBoxes(bytes, stbl.body, stbl.end, "video.mp4 stbl", budget, 5).find((box) => box.type === "stsz" && box.end - box.body >= 12);
+  let frames = 0; let sampleBytes = 0n;
+  if (sampleSize) {
+    const versionFlags = bytes.readUInt32BE(sampleSize.body); const fixedSize = bytes.readUInt32BE(sampleSize.body + 4); frames = bytes.readUInt32BE(sampleSize.body + 8);
+    if (versionFlags !== 0 || frames === 0 || frames === 0xffffffff || frames > MAX_MP4_SAMPLES || fixedSize === 0xffffffff) fail("video.mp4 contains an invalid stsz header.");
+    if (fixedSize === 0) {
+      if (sampleSize.end - sampleSize.body !== 12 + frames * 4) fail("video.mp4 contains an invalid per-sample stsz table.");
+      for (let index = 0; index < frames; index += 1) {
+        const size = bytes.readUInt32BE(sampleSize.body + 12 + index * 4);
+        if (size === 0 || size === 0xffffffff) fail("video.mp4 contains an invalid sample size.");
+        sampleBytes += BigInt(size);
+      }
+    } else {
+      if (sampleSize.end - sampleSize.body !== 12) fail("video.mp4 contains trailing fixed-size stsz data.");
+      sampleBytes = BigInt(fixedSize) * BigInt(frames);
+    }
+    if (sampleBytes === 0n || sampleBytes > BigInt(mdat.end - mdat.body)) fail("video.mp4 sample evidence exceeds its media payload.");
+  }
   if (!videoHandler || frames === 0 || !track || !movie) fail("video.mp4 has no video track with nonempty sample evidence.");
   const width = bytes.readUInt32BE(track.end - 8) / 65536; const height = bytes.readUInt32BE(track.end - 4) / 65536;
   const timescale = bytes.readUInt32BE(movie.body + 12); const duration = timescale === 0 ? 0 : bytes.readUInt32BE(movie.body + 16) / timescale;

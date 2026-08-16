@@ -13,6 +13,30 @@ async function fixtureBytes(): Promise<Record<string, Buffer>> {
   return Object.fromEntries(await Promise.all(FIXTURE_NAMES.map(async (name) => [name, await readFile(path.join(process.cwd(), "tests/fixtures/media", name))])));
 }
 
+function copyFixtures(fixtures: Record<string, Buffer>): Record<string, Buffer> {
+  return Object.fromEntries(Object.entries(fixtures).map(([name, bytes]) => [name, Buffer.from(bytes)]));
+}
+
+function box(type: string, payload: Buffer): Buffer {
+  const result = Buffer.alloc(8 + payload.length);
+  result.writeUInt32BE(result.length, 0);
+  result.write(type, 4, 4, "ascii");
+  payload.copy(result, 8);
+  return result;
+}
+
+function gifImageDataOffsets(bytes: Buffer): { descriptor: number; lzw: number } {
+  const descriptor = bytes.indexOf(0x2c, 13);
+  if (descriptor < 0) throw new Error("fixture has no GIF image descriptor");
+  const packed = bytes[descriptor + 9]!;
+  const paletteBytes = (packed & 0x80) === 0 ? 0 : 3 * (1 << ((packed & 0x07) + 1));
+  return { descriptor, lzw: descriptor + 10 + paletteBytes };
+}
+
+function replaceFixture(fixtures: Record<string, Buffer>, name: string, bytes: Buffer): Record<string, Buffer> {
+  return { ...copyFixtures(fixtures), [name]: bytes };
+}
+
 describe("native-roundtrip", () => {
   it("rejects a non-native executable path", async () => {
     await expect(validateNativeBinary(process.execPath)).rejects.toThrow("not Arthur's direct Rust binary");
@@ -80,6 +104,91 @@ describe("native-roundtrip", () => {
       corrupt(candidate[fixture]!);
       expect(() => inspectMediaBytes(candidate), `${fixture} ${structure}`).toThrow();
     }
+  });
+
+  it("rejects invalid GIF geometry, illegal LZW code sizes, and unterminated image data", async () => {
+    const originals = await fixtureBytes();
+    const mutations: Array<{ name: string; mutate: (bytes: Buffer) => Buffer }> = [
+      { name: "zero logical width", mutate: (bytes) => { bytes.writeUInt16LE(0, 6); return bytes; } },
+      { name: "zero logical height", mutate: (bytes) => { bytes.writeUInt16LE(0, 8); return bytes; } },
+      { name: "zero frame width", mutate: (bytes) => { const { descriptor } = gifImageDataOffsets(bytes); bytes.writeUInt16LE(0, descriptor + 5); return bytes; } },
+      { name: "zero frame height", mutate: (bytes) => { const { descriptor } = gifImageDataOffsets(bytes); bytes.writeUInt16LE(0, descriptor + 7); return bytes; } },
+      { name: "frame outside logical width", mutate: (bytes) => { const { descriptor } = gifImageDataOffsets(bytes); bytes.writeUInt16LE(bytes.readUInt16LE(6), descriptor + 1); return bytes; } },
+      { name: "frame outside logical height", mutate: (bytes) => { const { descriptor } = gifImageDataOffsets(bytes); bytes.writeUInt16LE(bytes.readUInt16LE(8), descriptor + 3); return bytes; } },
+      { name: "LZW minimum code size below 2", mutate: (bytes) => { const { lzw } = gifImageDataOffsets(bytes); bytes[lzw] = 1; return bytes; } },
+      { name: "LZW minimum code size above 8", mutate: (bytes) => { const { lzw } = gifImageDataOffsets(bytes); bytes[lzw] = 9; return bytes; } },
+      { name: "unterminated image sub-blocks", mutate: (bytes) => bytes.subarray(0, bytes.length - 2) },
+    ];
+    for (const mutation of mutations) {
+      const gif = mutation.mutate(Buffer.from(originals["animated.gif"]!));
+      expect(() => inspectMediaBytes(replaceFixture(originals, "animated.gif", gif)), mutation.name).toThrow(/animated\.gif/i);
+    }
+  });
+
+  it("requires MP3 frames to consume the exact file without truncation or trailing garbage", async () => {
+    const originals = await fixtureBytes();
+    const mp3 = originals["audio.mp3"]!;
+    expect(() => inspectMediaBytes(replaceFixture(originals, "audio.mp3", Buffer.concat([mp3, Buffer.from("garbage")])))).toThrow(/audio\.mp3/i);
+    expect(() => inspectMediaBytes(replaceFixture(originals, "audio.mp3", mp3.subarray(0, mp3.length - 1)))).toThrow(/audio\.mp3/i);
+  });
+
+  it("rejects malformed, unbounded, or media-inconsistent MP4 sample tables", async () => {
+    const originals = await fixtureBytes();
+    const source = originals["video.mp4"]!;
+    const type = source.indexOf(Buffer.from("stsz"));
+    expect(type).toBeGreaterThan(3);
+    const body = type + 4;
+    const mutations: Array<{ name: string; mutate: (bytes: Buffer) => void }> = [
+      { name: "nonzero stsz version", mutate: (bytes) => { bytes[body] = 1; } },
+      { name: "nonzero stsz flags", mutate: (bytes) => { bytes[body + 3] = 1; } },
+      { name: "sentinel sample count", mutate: (bytes) => bytes.writeUInt32BE(0xffffffff, body + 8) },
+      { name: "sample count above cap", mutate: (bytes) => bytes.writeUInt32BE(1_000_001, body + 8) },
+      { name: "truncated per-sample table", mutate: (bytes) => bytes.writeUInt32BE(12, type - 4) },
+      { name: "sample bytes exceed mdat", mutate: (bytes) => { bytes.writeUInt32BE(1_000, body + 4); bytes.writeUInt32BE(2, body + 8); bytes.writeUInt32BE(20, type - 4); bytes.writeUInt32BE(8, body + 12); bytes.write("free", body + 16, 4, "ascii"); } },
+    ];
+    for (const mutation of mutations) {
+      const mp4 = Buffer.from(source); mutation.mutate(mp4);
+      expect(() => inspectMediaBytes(replaceFixture(originals, "video.mp4", mp4)), mutation.name).toThrow(/video\.mp4/i);
+    }
+  });
+
+  it("bounds AVIF iloc item, extent, sized-integer, and zero-progress work", async () => {
+    const originals = await fixtureBytes();
+    const source = originals["photo.avif"]!;
+    const type = source.indexOf(Buffer.from("iloc"));
+    expect(type).toBeGreaterThan(3);
+    const body = type + 4;
+    const mutations: Array<{ name: string; mutate: (bytes: Buffer) => void }> = [
+      { name: "item count cap", mutate: (bytes) => bytes.writeUInt16BE(0xffff, body + 6) },
+      { name: "extent count cap", mutate: (bytes) => bytes.writeUInt16BE(0xffff, body + 12) },
+      { name: "zero-width extent fields", mutate: (bytes) => { bytes[body + 4] = 0; } },
+      { name: "invalid 15-byte extent field", mutate: (bytes) => { bytes[body + 4] = 0xf4; } },
+      { name: "reserved version-zero index size", mutate: (bytes) => { bytes[body + 5] = 4; } },
+    ];
+    for (const mutation of mutations) {
+      const avif = Buffer.from(source); mutation.mutate(avif);
+      expect(() => inspectMediaBytes(replaceFixture(originals, "photo.avif", avif)), mutation.name).toThrow(/photo\.avif iloc/i);
+    }
+  });
+
+  it("rejects deeply nested and excessive BMFF boxes with explicit budgets and no RangeError", async () => {
+    const originals = await fixtureBytes();
+    const ftyp = box("ftyp", Buffer.from("avif\0\0\0\0avif", "binary"));
+    const mdat = box("mdat", Buffer.from([1]));
+    let nested = box("free", Buffer.alloc(0));
+    for (let index = 0; index < 12_000; index += 1) nested = box("iprp", nested);
+    const deeplyNested = Buffer.concat([ftyp, box("meta", Buffer.concat([Buffer.alloc(4), nested])), mdat]);
+    try {
+      inspectMediaBytes(replaceFixture(originals, "photo.avif", deeplyNested));
+      throw new Error("deep nesting unexpectedly passed");
+    } catch (error) {
+      expect(error).not.toBeInstanceOf(RangeError);
+      expect(String(error)).toMatch(/photo\.avif.*(?:depth|budget)/i);
+    }
+
+    const excessive = Buffer.concat(Array.from({ length: 5_000 }, () => box("iprp", Buffer.alloc(0))));
+    const tooManyBoxes = Buffer.concat([ftyp, box("meta", Buffer.concat([Buffer.alloc(4), excessive])), mdat]);
+    expect(() => inspectMediaBytes(replaceFixture(originals, "photo.avif", tooManyBoxes))).toThrow(/photo\.avif.*box budget/i);
   });
 
   it("rejects extra, reordered, failed, or diagnostic-leaking transcripts", () => {
