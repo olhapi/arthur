@@ -11,5 +11,6 @@
     "verbatimModuleSyntax": true,
     "types": ["node"]
   },
-  "include": ["src/shared/**/*.ts", "src/native/**/*.ts"]
+  "include": ["src/shared/**/*.ts", "src/native/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
 }
