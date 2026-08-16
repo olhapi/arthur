@@ -29,7 +29,7 @@
 - The Rust crate's only direct runtime dependencies are `serde` 1.0.229, `serde_json` 1.0.151, `rustix` 1.1.4, `url` 2.5.8, `sha2` 0.11.0, and `base64` 0.23.1, with the exact features in Task 3.
 - Third-party dependencies must be actively maintained, non-deprecated, necessary, audited, and pinned exactly in `pnpm-lock.yaml` and `native/Cargo.lock`.
 - `cargo audit --file native/Cargo.lock` is mandatory. If cargo-audit 0.22.2 cannot be installed and version-verified, stop; never skip or weaken the gate.
-- Every native build/gate command resolves `$(brew --prefix rustup)/bin` and explicitly selects toolchain 1.97.1; never invoke the unrelated plain Homebrew `cargo` 1.94. This is build-time only and does not change the installed host's independence from Homebrew and Node.
+- Every native build/gate command runs through `node scripts/rust-toolchain.mjs <cargo-args...>`. The adapter resolves exact toolchain 1.97.1 Cargo/rustc binaries, injects only a copied child environment, and prevents fallback to Homebrew Rust 1.94. This is build-time only and does not change the installed host's independence from Homebrew and Node.
 - Every behavior task follows red-green-refactor and ends in a Conventional Commit.
 - Terra implements each SDD task; Sol performs the independent specification and quality reviews before the task is accepted.
 
@@ -53,6 +53,8 @@
 - `src/article/extract.ts`: Readability pipeline and extracted-article contract.
 - `tests/contracts/native-messages.json`: shared valid/invalid client and host message fixtures consumed by TypeScript and Rust.
 - `rust-toolchain.toml`: exact Rust 1.97.1 toolchain with rustfmt and clippy.
+- `scripts/rust-toolchain.mjs`: dependency-free build-time adapter that resolves and verifies exact Rust 1.97.1 binaries before spawning Cargo.
+- `scripts/rust-toolchain.test.ts`: behavior tests for toolchain resolution, version rejection, forwarding, child environment, signals, and exit status.
 - `native/Cargo.toml`: macOS host crate and six exact direct dependencies.
 - `native/Cargo.lock`: immutable native dependency resolution.
 - `native/src/protocol.rs`: strict serde enums plus semantic validation matching canonical Zod contracts.
@@ -365,6 +367,8 @@ Expected: article tests pass with original media URLs represented once and unsaf
 - Delete: `src/native/paths.test.ts`
 - Delete: `tsconfig.native.json`
 - Create: `rust-toolchain.toml`
+- Create: `scripts/rust-toolchain.mjs`
+- Test: `scripts/rust-toolchain.test.ts`
 - Create: `native/Cargo.toml`
 - Create: `native/Cargo.lock`
 - Create: `native/src/lib.rs`
@@ -380,6 +384,7 @@ Expected: article tests pass with original media URLs represented once and unsaf
 - Modify: `package.json`
 - Modify: `pnpm-lock.yaml`
 - Modify: `tsconfig.json`
+- Modify: `vitest.config.ts`
 - Modify: `.gitignore`
 - Modify: `docs/dependencies.md`
 
@@ -389,10 +394,48 @@ Expected: article tests pass with original media URLs represented once and unsaf
 - `Vault` owns private `OwnedFd` values for the resolved destination and `attachments/`. Its interface returns status/display values only; it never returns a descriptor or a child path that a caller can use for mutation.
 - `VaultProbe` is `{ canonical_destination: PathBuf, writable: bool }`. `VaultError` has stable variants `InvalidDestination`, `NotDirectory`, `NotWritable`, `UnsafeChild`, `InvalidName`, `InvalidSource`, `InvalidTransition`, `MediaLimitExceeded`, `AttachmentConflict`, `UnresolvedPlaceholder`, and `Io`; path-bearing I/O details remain private.
 - `FrameDecoder` has only `Active` and `Poisoned` states. Every length, framing, UTF-8, or JSON error transitions to `Poisoned`; every later `push` returns `FrameError::Poisoned` without inspecting its bytes.
+- Produces the build-time interface `node scripts/rust-toolchain.mjs <cargo-args...>`. The script also exports dependency-injected `resolveToolchain(deps)` and `runCargo(args, deps)` for behavior tests; these are implementation seams, not runtime host dependencies.
 
-- [ ] **Step 1: Resolve and verify the keg-only Rust toolchain and audit executable**
+- [ ] **Step 1: Build and behavior-test the exact Rust toolchain adapter**
 
-Homebrew installs rustup keg-only, so the unrelated plain Homebrew Cargo on `PATH` must not be used. Resolve the prefix at runtime so the same plan works on Apple Silicon and Intel. Install Homebrew rustup only when its prefix lookup fails, then select/verify the exact toolchain and audit executable:
+First add `scripts/**/*.test.ts` to `vitest.config.ts`. Write `scripts/rust-toolchain.test.ts` against injected `execFileSync`, `spawn`, environment, and signal hooks. Do not inspect source text. Assert real behavior:
+
+```ts
+expect(() => runCargo([], deps)).toThrow(/cargo argument/i);
+expect(resolveToolchain(deps)).toEqual({
+  cargo: "/toolchains/1.97.1/bin/cargo",
+  rustc: "/toolchains/1.97.1/bin/rustc",
+  bin: "/toolchains/1.97.1/bin",
+});
+expect(spawn).toHaveBeenCalledWith(
+  "/toolchains/1.97.1/bin/cargo",
+  ["test", "--locked"],
+  expect.objectContaining({
+    stdio: "inherit",
+    env: expect.objectContaining({
+      RUSTC: "/toolchains/1.97.1/bin/rustc",
+      PATH: `/toolchains/1.97.1/bin:${originalPath}`,
+    }),
+  }),
+);
+expect(parentEnvironment).toEqual(originalEnvironment);
+```
+
+Mock resolution must assert calls to `brew --prefix rustup`, then `<prefix>/bin/rustup which cargo --toolchain 1.97.1` and `which rustc --toolchain 1.97.1`. Add separate cases rejecting `rustc 1.97.0`, `rustc 1.97.10`, `cargo 1.97.0`, missing output, failed resolution, and empty arguments. Simulated child close code 23 must become adapter exit 23. Simulated `SIGINT`, `SIGTERM`, and `SIGHUP` must be forwarded to the child and handlers must be removed after close; a child signal exit must be re-emitted by the CLI process seam.
+
+Run RED:
+
+```bash
+rtk pnpm test -- scripts/rust-toolchain.test.ts
+```
+
+Expected: FAIL because `scripts/rust-toolchain.mjs` does not exist.
+
+Implement the adapter using only `node:child_process`, `node:path`, and `node:process`. `resolveToolchain` must call `execFileSync("brew", ["--prefix", "rustup"], { encoding: "utf8" })`, resolve `<prefix>/bin/rustup`, call that binary's `which` command separately for Cargo/rustc with `--toolchain 1.97.1`, and execute the returned binaries with `--version`. Require prefixes `cargo 1.97.1` and `rustc 1.97.1` followed by a space or end-of-line; `1.97.10` is not a match.
+
+`runCargo` must reject an empty argument array, copy `process.env`, prepend `dirname(resolvedCargo)` plus `path.delimiter` to the copied `PATH`, set copied `RUSTC` to the resolved rustc, and spawn the resolved Cargo path with caller arguments and `stdio: "inherit"`. It must never mutate `process.env` or a user profile. Forward `SIGINT`, `SIGTERM`, and `SIGHUP`, remove handlers on completion, and propagate the child's exact exit code or terminating signal.
+
+Bootstrap only rustup/toolchain availability before the first real adapter call:
 
 ```bash
 if ! brew --prefix rustup >/dev/null 2>&1; then
@@ -400,18 +443,18 @@ if ! brew --prefix rustup >/dev/null 2>&1; then
 fi
 RUSTUP_BIN="$(brew --prefix rustup)/bin"
 rtk "$RUSTUP_BIN/rustup" toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
-rtk "$RUSTUP_BIN/rustc" +1.97.1 --version
-rtk "$RUSTUP_BIN/cargo" +1.97.1 --version
+rtk pnpm test -- scripts/rust-toolchain.test.ts
+rtk node scripts/rust-toolchain.mjs --version
 CARGO_AUDIT_BIN="${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit"
 if [ ! -x "$CARGO_AUDIT_BIN" ] || [ "$("$CARGO_AUDIT_BIN" --version)" != "cargo-audit 0.22.2" ]; then
-  rtk "$RUSTUP_BIN/cargo" +1.97.1 install cargo-audit --version 0.22.2 --locked
+  rtk node scripts/rust-toolchain.mjs install cargo-audit --version 0.22.2 --locked
 fi
 rtk "$CARGO_AUDIT_BIN" --version
 ```
 
-Expected: the rustc proxy reports `rustc 1.97.1`, the cargo proxy resolves toolchain 1.97.1, and the standard Cargo-bin executable reports `cargo-audit 0.22.2`. Current setup already satisfies these checks; the condition is for reproducible recovery. If the prefix lookup, toolchain selection, install, or version check fails, stop the task. Do not temporarily export `PATH`, use plain `cargo`, remove `audit:native`, or substitute `cargo tree`, `cargo deny`, or a registry search for the audit.
+Expected: behavior tests pass, adapter Cargo reports `cargo 1.97.1`, its internal rustc verification reports exact `rustc 1.97.1`, and the standard Cargo-bin executable reports `cargo-audit 0.22.2`. If any resolution/version test fails, stop. Do not use raw Cargo/rustup wrappers after this bootstrap, remove `audit:native`, or substitute another audit.
 
-- [ ] **Step 2: Record the verified dependency review through the selected Cargo proxy**
+- [ ] **Step 2: Record the verified dependency review through the exact-binary adapter**
 
 Add a Rust table to `docs/dependencies.md` with these exact pins and the repository activity observed on 2026-08-16:
 
@@ -427,18 +470,18 @@ Add a Rust table to `docs/dependencies.md` with these exact pins and the reposit
 Recheck, rather than assuming the recorded snapshot is still current:
 
 ```bash
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search serde --limit 1
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search serde_json --limit 1
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search rustix --limit 1
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search url --limit 1
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search sha2 --limit 1
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search base64 --limit 1
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info serde@1.0.229
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info serde_json@1.0.151
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info rustix@1.1.4
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info url@2.5.8
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info sha2@0.11.0
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info base64@0.23.1
+rtk node scripts/rust-toolchain.mjs search serde --limit 1
+rtk node scripts/rust-toolchain.mjs search serde_json --limit 1
+rtk node scripts/rust-toolchain.mjs search rustix --limit 1
+rtk node scripts/rust-toolchain.mjs search url --limit 1
+rtk node scripts/rust-toolchain.mjs search sha2 --limit 1
+rtk node scripts/rust-toolchain.mjs search base64 --limit 1
+rtk node scripts/rust-toolchain.mjs info serde@1.0.229
+rtk node scripts/rust-toolchain.mjs info serde_json@1.0.151
+rtk node scripts/rust-toolchain.mjs info rustix@1.1.4
+rtk node scripts/rust-toolchain.mjs info url@2.5.8
+rtk node scripts/rust-toolchain.mjs info sha2@0.11.0
+rtk node scripts/rust-toolchain.mjs info base64@0.23.1
 ```
 
 Inspect each listed primary repository and the current RustSec database. If a pin is yanked, deprecated, inactive without an acceptable maintainer explanation, or newly vulnerable, stop and report the evidence; do not choose another version or crate silently.
@@ -524,11 +567,11 @@ Update `package.json` to remove the native `tsc` invocation and add these exact 
 ```json
 {
   "typecheck": "wxt prepare && tsc --noEmit",
-  "test:native": "\"$(brew --prefix rustup)/bin/cargo\" +1.97.1 test --manifest-path native/Cargo.toml --locked",
-  "format:native:check": "\"$(brew --prefix rustup)/bin/cargo\" +1.97.1 fmt --manifest-path native/Cargo.toml --all -- --check",
-  "lint:native": "\"$(brew --prefix rustup)/bin/cargo\" +1.97.1 clippy --manifest-path native/Cargo.toml --all-targets --locked -- -D warnings",
-  "audit:native": "test \"$(\"${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit\" --version)\" = \"cargo-audit 0.22.2\" && PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\" \"$(brew --prefix rustup)/bin/cargo\" +1.97.1 audit --file native/Cargo.lock",
-  "build:native": "\"$(brew --prefix rustup)/bin/cargo\" +1.97.1 build --manifest-path native/Cargo.toml --release --locked",
+  "test:native": "node scripts/rust-toolchain.mjs test --manifest-path native/Cargo.toml --locked",
+  "format:native:check": "node scripts/rust-toolchain.mjs fmt --manifest-path native/Cargo.toml --all -- --check",
+  "lint:native": "node scripts/rust-toolchain.mjs clippy --manifest-path native/Cargo.toml --all-targets --locked -- -D warnings",
+  "audit:native": "test \"$(\"${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit\" --version)\" = \"cargo-audit 0.22.2\" && PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\" node scripts/rust-toolchain.mjs audit --file native/Cargo.lock",
+  "build:native": "node scripts/rust-toolchain.mjs build --manifest-path native/Cargo.toml --release --locked",
   "verify:native": "pnpm test:native && pnpm format:native:check && pnpm lint:native && pnpm build:native && pnpm audit:native",
   "build": "pnpm build:native && pnpm build:chrome && pnpm build:edge && pnpm build:firefox",
   "verify": "pnpm test && pnpm typecheck && pnpm verify:native && pnpm build && pnpm audit --audit-level high"
@@ -539,7 +582,7 @@ Add `native/target/` to `.gitignore`, run `rtk pnpm install --frozen-lockfile=fa
 
 ```bash
 rtk pnpm test -- src/shared/protocol.contract.test.ts
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 test --manifest-path native/Cargo.toml --test contracts
+rtk node scripts/rust-toolchain.mjs test --manifest-path native/Cargo.toml --test contracts
 ```
 
 Expected: the TypeScript fixture test passes against canonical Zod; Rust compilation fails because `protocol`, `framing`, and `vault` are not implemented.
@@ -604,7 +647,7 @@ Keep filename and frontmatter behavior private in `names.rs` and `frontmatter.rs
 Run in this order:
 
 ```bash
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 generate-lockfile --manifest-path native/Cargo.toml
+rtk node scripts/rust-toolchain.mjs generate-lockfile --manifest-path native/Cargo.toml
 rtk pnpm test:native
 rtk pnpm format:native:check
 rtk pnpm lint:native
@@ -620,7 +663,7 @@ rtk git status --short
 Expected: Rust tests/lints/build and both audits exit 0; `native/Cargo.lock` is present; the only deleted production files are the rejected TypeScript helper and `tsconfig.native.json`; browser TypeScript still passes. Then commit exactly the Task 3 files:
 
 ```bash
-rtk git add package.json pnpm-lock.yaml tsconfig.json .gitignore docs/dependencies.md rust-toolchain.toml native tests/contracts/native-messages.json src/shared/protocol.contract.test.ts
+rtk git add package.json pnpm-lock.yaml tsconfig.json vitest.config.ts .gitignore docs/dependencies.md rust-toolchain.toml scripts/rust-toolchain.mjs scripts/rust-toolchain.test.ts native tests/contracts/native-messages.json src/shared/protocol.contract.test.ts
 rtk git add -u src/native tsconfig.native.json
 rtk git commit -m "feat: replace native helper foundation with Rust"
 ```
@@ -667,7 +710,7 @@ In `native/tests/vault_transaction.rs`, construct `SaveSpec` and `MediaSpec` val
 Run:
 
 ```bash
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 test --manifest-path native/Cargo.toml --test vault_transaction
+rtk node scripts/rust-toolchain.mjs test --manifest-path native/Cargo.toml --test vault_transaction
 ```
 
 Expected: FAIL because `Vault::begin`, `VaultTransaction`, and `vault/transaction.rs` do not exist.
@@ -730,7 +773,7 @@ Capture stdout and stderr separately and validate every stdout value against a `
 Run:
 
 ```bash
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 test --manifest-path native/Cargo.toml --test server --test native_host
+rtk node scripts/rust-toolchain.mjs test --manifest-path native/Cargo.toml --test server --test native_host
 ```
 
 Expected: FAIL because the session adapter, dispatcher, and binary adapter do not exist.
@@ -1043,7 +1086,7 @@ Set the final scripts exactly:
 
 - [ ] **Step 4: Write exact setup and acceptance documentation**
 
-`README.md` must cover macOS v1 requirements, Rust 1.97.1 and Node 22+/pnpm development roles, the six direct Rust crates, dependency/audit policy, development, unpacked Chrome/Edge loading, temporary Firefox loading, single-binary native-host installation, destination configuration, one-click use, file layout, warnings/limits, builds/zips, verification, and bounded uninstall. Do not describe Node as an installed-host runtime requirement.
+`README.md` must cover macOS v1 requirements, Rust 1.97.1 and Node 22+/pnpm development roles, the dependency-free `scripts/rust-toolchain.mjs` build-time adapter, the six direct Rust crates, dependency/audit policy, development, unpacked Chrome/Edge loading, temporary Firefox loading, single-binary native-host installation, destination configuration, one-click use, file layout, warnings/limits, builds/zips, verification, and bounded uninstall. State that native repository scripts select exact toolchain binaries through the adapter, and do not describe Node, Homebrew, rustup, Cargo, or a parent shell environment as an installed-host runtime requirement.
 
 `docs/acceptance.md` must list the exact automated commands and expected outputs from Step 5, plus bounded manual checks for one-click toolbar behavior in installed Chrome, Edge, and Firefox profiles. Include a file inventory proving the native install contains one binary and three manifests, a direct hello with minimal `PATH`, byte hashes for every input/output fixture pair, normalized overwrite evidence, warning fallback evidence, poison/termination evidence, and before/after destination trees for commit-last failures.
 
@@ -1054,7 +1097,7 @@ First verify the audit executable; a missing/mismatched tool blocks release:
 ```bash
 rtk zsh -lc 'test "$("${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit" --version)" = "cargo-audit 0.22.2"'
 rtk pnpm install --frozen-lockfile
-rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 fetch --manifest-path native/Cargo.toml --locked
+rtk node scripts/rust-toolchain.mjs fetch --manifest-path native/Cargo.toml --locked
 rtk pnpm verify
 rtk pnpm zip
 rtk git diff --check
