@@ -1829,8 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn late_fixed_child_mismatch_blocks_exchange_pending_recovery_without_mutating_target_or_backup()
-     {
+    fn late_fixed_child_mismatch_quarantines_only_its_slot_without_mutating_target_or_backup() {
         let destination = temp();
         write_old_article(&destination);
         let transaction = Vault::open(&destination)
@@ -1855,10 +1854,7 @@ mod tests {
         let target_before = fs::read(&target).unwrap();
         let backup_before = fs::read(&backup).unwrap();
 
-        assert_eq!(
-            Vault::open(&destination).err(),
-            Some(VaultError::UnsafeChild)
-        );
+        drop(Vault::open(&destination).unwrap());
         assert_eq!(fs::read(&target).unwrap(), target_before);
         assert_eq!(fs::read(&backup).unwrap(), backup_before);
         assert_eq!(fs::read(&new_note).unwrap(), b"unrelated fixed child");
@@ -1867,9 +1863,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_later_slot_blocks_exchange_pending_recovery_without_mutating_target_or_backup() {
+    fn invalid_later_slot_waits_for_inspection_then_allows_earlier_recovery() {
         let destination = temp();
-        write_old_article(&destination);
+        let old = write_old_article(&destination);
         let transaction = Vault::open(&destination)
             .unwrap()
             .begin(save("new body"))
@@ -1887,14 +1883,14 @@ mod tests {
         fs::write(&target, b"unrelated target").unwrap();
         let target_before = fs::read(&target).unwrap();
         let backup_before = fs::read(&backup).unwrap();
-        fs::write(workspace.join("slot-1/owner"), b"unrelated fixed child").unwrap();
+        let later_owner = workspace.join("slot-1/owner");
+        fs::write(&later_owner, b"unrelated fixed child").unwrap();
 
-        assert_eq!(
-            Vault::open(&destination).err(),
-            Some(VaultError::UnsafeChild)
-        );
-        assert_eq!(fs::read(&target).unwrap(), target_before);
-        assert_eq!(fs::read(&backup).unwrap(), backup_before);
+        drop(Vault::open(&destination).unwrap());
+        assert_eq!(fs::read(&target).unwrap(), old);
+        assert_eq!(fs::read(&backup).unwrap(), target_before);
+        assert_eq!(fs::read(&later_owner).unwrap(), b"unrelated fixed child");
+        assert_ne!(fs::read(&backup).unwrap(), backup_before);
 
         fs::remove_dir_all(destination).unwrap();
     }

@@ -529,13 +529,17 @@ impl Workspace {
             return Err(VaultError::UnsafeChild);
         }
         // Opening a slot is strictly inspection: no scratch reset, rename, or
-        // exchange runs until every slot has passed its descriptor and journal
-        // authority checks. A single invalid slot makes the workspace unsafe;
-        // skipping it could let another slot mutate a destination first.
-        let inspected = (0..SLOT_COUNT)
-            .map(|index| open_slot(&directory, &owner, destination, index))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| VaultError::UnsafeChild)?;
+        // exchange runs until every slot has had its descriptor and journal
+        // authority checked. An invalid slot is quarantined by excluding it
+        // from the recovered set; its descriptor tree and destination target
+        // are never mutated. Valid slots remain usable after the complete
+        // inspection pass.
+        let mut inspected = Vec::with_capacity(SLOT_COUNT);
+        for index in 0..SLOT_COUNT {
+            if let Ok(slot) = open_slot(&directory, &owner, destination, index) {
+                inspected.push(slot);
+            }
+        }
         let slots = inspected
             .into_iter()
             .filter_map(|mut slot| {
@@ -1218,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn injected_fingerprint_error_quarantines_exchange_pending_without_mutating_target_or_backup() {
+    fn injected_fingerprint_error_quarantines_only_its_slot_without_mutating_target_or_backup() {
         let path = temp();
         let destination = fs::open_destination(&path).unwrap();
         let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
@@ -1250,13 +1254,12 @@ mod tests {
 
         fs::fail_next_regular_file_fingerprint();
         let destination = fs::open_destination(&path).unwrap();
-        assert_eq!(
-            Workspace::open(&destination).err(),
-            Some(VaultError::UnsafeChild)
-        );
+        let next = Workspace::open(&destination).unwrap().claim().unwrap();
+        assert_eq!(next.index(), 1);
         assert_eq!(stdfs::read(&target).unwrap(), target_before);
         assert_eq!(stdfs::read(&backup).unwrap(), backup_before);
 
+        drop(next);
         drop(destination);
         stdfs::remove_dir_all(path).unwrap();
     }
@@ -1339,6 +1342,96 @@ mod tests {
     }
 
     #[test]
+    fn later_invalid_slot_is_inspected_before_earlier_preparing_slot_recovers() {
+        let path = temp();
+        let destination = fs::open_destination(&path).unwrap();
+        let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
+        slot.begin().unwrap();
+        slot.write_new_note(b"earlier staged note").unwrap();
+        let first_scratch = path.join(WORKSPACE_NAME).join("slot-0").join(NEW_NOTE);
+        let later_owner = path
+            .join(WORKSPACE_NAME)
+            .join("slot-3")
+            .join(WORKSPACE_OWNER);
+        drop(slot);
+        drop(destination);
+
+        stdfs::write(&later_owner, b"later substitute").unwrap();
+
+        let destination = fs::open_destination(&path).unwrap();
+        let next = Workspace::open(&destination).unwrap().claim().unwrap();
+
+        assert_eq!(next.index(), 0);
+        assert_eq!(stdfs::read(&first_scratch).unwrap(), b"");
+        assert_eq!(stdfs::read(&later_owner).unwrap(), b"later substitute");
+
+        drop(next);
+        drop(destination);
+        stdfs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn reopening_after_opaque_substitute_recovery_uses_another_valid_slot() {
+        use std::os::unix::fs::symlink;
+
+        let path = temp();
+        let destination = fs::open_destination(&path).unwrap();
+        let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
+        slot.begin().unwrap();
+        let target = path.join("Article.md");
+        let displaced = path.join("displaced-article");
+        let outside = path.join("outside");
+        stdfs::write(&target, b"old").unwrap();
+        let old = fs::fingerprint_regular_file(&destination, "Article.md").unwrap();
+        let new = slot.write_new_note(b"new").unwrap();
+        let mut source = fs::open_regular_file(&destination, "Article.md").unwrap();
+        let backup = slot.copy_old_note(&mut source).unwrap();
+        slot.persist(
+            JournalPhase::ExchangePending,
+            Some("Article.md".to_owned()),
+            Some(old),
+            Some(backup),
+            Some(new),
+        )
+        .unwrap();
+        let backup_path = path.join(WORKSPACE_NAME).join("slot-0").join(OLD_BACKUP);
+        stdfs::rename(&target, &displaced).unwrap();
+        stdfs::write(&outside, b"outside").unwrap();
+        symlink(&outside, &target).unwrap();
+        drop(source);
+        drop(slot);
+        drop(destination);
+
+        let destination = fs::open_destination(&path).unwrap();
+        let first = Workspace::open(&destination).unwrap().claim().unwrap();
+        assert_eq!(first.index(), 1);
+        assert_eq!(stdfs::read(&target).unwrap(), b"old");
+        assert!(
+            stdfs::symlink_metadata(&backup_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        drop(first);
+        drop(destination);
+
+        let destination = fs::open_destination(&path).unwrap();
+        let second = Workspace::open(&destination).unwrap().claim().unwrap();
+        assert_eq!(second.index(), 1);
+        assert_eq!(stdfs::read(&target).unwrap(), b"old");
+        assert!(
+            stdfs::symlink_metadata(&backup_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        drop(second);
+        drop(destination);
+        stdfs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn corrupted_journals_quarantine_each_slot_and_fail_when_all_four_are_bad() {
         let path = temp();
         let destination = fs::open_destination(&path).unwrap();
@@ -1364,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn checksum_valid_semantic_mismatch_and_generation_gap_block_workspace_recovery() {
+    fn checksum_valid_semantic_mismatch_and_generation_gap_quarantine_only_their_slot() {
         for gap in [false, true] {
             let path = temp();
             let destination = fs::open_destination(&path).unwrap();
@@ -1385,10 +1478,9 @@ mod tests {
             .unwrap();
 
             let destination = fs::open_destination(&path).unwrap();
-            assert_eq!(
-                Workspace::open(&destination).err(),
-                Some(VaultError::UnsafeChild)
-            );
+            let next = Workspace::open(&destination).unwrap().claim().unwrap();
+            assert_eq!(next.index(), 1);
+            drop(next);
             drop(destination);
             stdfs::remove_dir_all(path).unwrap();
         }
@@ -1538,7 +1630,7 @@ mod tests {
     }
 
     #[test]
-    fn checksum_valid_impossible_journal_blocks_workspace_without_resetting_scratch() {
+    fn checksum_valid_impossible_journal_quarantines_its_slot_without_resetting_scratch() {
         let path = temp();
         let destination = fs::open_destination(&path).unwrap();
         let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
@@ -1562,16 +1654,15 @@ mod tests {
         drop(destination);
 
         let destination = fs::open_destination(&path).unwrap();
-        assert_eq!(
-            Workspace::open(&destination).err(),
-            Some(VaultError::UnsafeChild)
-        );
+        let next = Workspace::open(&destination).unwrap().claim().unwrap();
+        assert_eq!(next.index(), 1);
         assert_eq!(stdfs::read(slot_path.join(NEW_NOTE)).unwrap(), b"new");
         assert_eq!(
             stdfs::read(slot_path.join(OLD_BACKUP)).unwrap(),
             b"different backup"
         );
         assert_eq!(stdfs::read(slot_path.join(JOURNAL_B)).unwrap(), journal);
+        drop(next);
         drop(destination);
         stdfs::remove_dir_all(path).unwrap();
     }
@@ -1683,10 +1774,12 @@ mod tests {
                     drop(next);
                 }
                 Substitute::HardLink => {
-                    assert_eq!(opened.err(), Some(VaultError::UnsafeChild));
+                    let next = opened.unwrap().claim().unwrap();
+                    assert_eq!(next.index(), 1);
                     assert_eq!(stdfs::read(&target).unwrap(), b"old");
                     assert_eq!(stdfs::read(path.join("article-alias")).unwrap(), b"old");
                     assert_eq!(stdfs::read(slot_path.join(OLD_BACKUP)).unwrap(), b"old");
+                    drop(next);
                 }
             }
             assert_eq!(stdfs::read(slot_path.join(NEW_NOTE)).unwrap(), b"new");
@@ -1792,19 +1885,18 @@ mod tests {
             drop(destination);
 
             let destination = fs::open_destination(&path).unwrap();
-            assert_eq!(
-                Workspace::open(&destination).err(),
-                Some(VaultError::UnsafeChild)
-            );
+            let next = Workspace::open(&destination).unwrap().claim().unwrap();
+            assert_eq!(next.index(), 1);
             assert_eq!(stdfs::read(&fixed).unwrap(), b"unrelated substitute");
             assert_eq!(stdfs::read(path.join("Created.md")).unwrap(), b"new note");
+            drop(next);
             drop(destination);
             stdfs::remove_dir_all(path).unwrap();
         }
     }
 
     #[test]
-    fn checksum_valid_noncanonical_fingerprint_blocks_workspace_recovery() {
+    fn checksum_valid_noncanonical_fingerprint_quarantines_only_its_slot() {
         let path = temp();
         let destination = fs::open_destination(&path).unwrap();
         let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
@@ -1828,10 +1920,9 @@ mod tests {
         .unwrap();
 
         let destination = fs::open_destination(&path).unwrap();
-        assert_eq!(
-            Workspace::open(&destination).err(),
-            Some(VaultError::UnsafeChild)
-        );
+        let next = Workspace::open(&destination).unwrap().claim().unwrap();
+        assert_eq!(next.index(), 1);
+        drop(next);
         drop(destination);
         stdfs::remove_dir_all(path).unwrap();
     }

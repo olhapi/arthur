@@ -161,6 +161,59 @@ fn four_wrong_slot_markers_quarantine_without_touching_substitutes() {
 }
 
 #[test]
+fn one_invalid_slot_leaves_three_usable_slots_for_saves() {
+    #[derive(Clone, Copy)]
+    enum InvalidSlot {
+        Marker,
+        Journals,
+        MissingFixedChild,
+    }
+
+    for invalid in [
+        InvalidSlot::Marker,
+        InvalidSlot::Journals,
+        InvalidSlot::MissingFixedChild,
+    ] {
+        let destination = temp();
+        drop(Vault::open(&destination).unwrap());
+        let slot = destination.join(".arthur-workspace-v1/slot-0");
+
+        match invalid {
+            InvalidSlot::Marker => fs::write(slot.join("owner"), b"unrelated marker").unwrap(),
+            InvalidSlot::Journals => {
+                fs::write(slot.join("journal-a"), b"corrupt-a").unwrap();
+                fs::write(slot.join("journal-b"), b"corrupt-b").unwrap();
+            }
+            InvalidSlot::MissingFixedChild => fs::remove_file(slot.join("new-note")).unwrap(),
+        }
+
+        Vault::open(&destination)
+            .unwrap()
+            .begin(save_spec(
+                "https://example.test/usable-slots",
+                "Usable Slots",
+                "saved through a valid slot",
+            ))
+            .unwrap()
+            .commit()
+            .unwrap();
+
+        assert!(destination.join("Usable Slots.md").is_file());
+        match invalid {
+            InvalidSlot::Marker => {
+                assert_eq!(fs::read(slot.join("owner")).unwrap(), b"unrelated marker")
+            }
+            InvalidSlot::Journals => {
+                assert_eq!(fs::read(slot.join("journal-a")).unwrap(), b"corrupt-a");
+                assert_eq!(fs::read(slot.join("journal-b")).unwrap(), b"corrupt-b");
+            }
+            InvalidSlot::MissingFixedChild => assert!(!slot.join("new-note").exists()),
+        }
+        fs::remove_dir_all(destination).unwrap();
+    }
+}
+
+#[test]
 fn partial_workspace_and_missing_fixed_children_fail_closed_without_cleanup() {
     let partial = temp();
     let workspace = partial.join(".arthur-workspace-v1");
