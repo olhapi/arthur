@@ -18,10 +18,12 @@
 - Save direct HTTP(S) audio/video files; leave streaming manifests and iframes as remote links.
 - A matching normalized `source` overwrites its existing note in place; a same-title/different-source note must never be overwritten.
 - Resource limits are 100 MiB per image, 2 GiB per audio/video file, and 4 GiB total per save.
+- Each save accepts at most 4,096 media items. The persistent workspace has exactly four reusable transaction slots.
 - Markdown is limited to 10 MiB UTF-16 units; browser-to-host request frames are limited to 64 MiB and host-to-browser response frames to 1 MiB.
 - Production writes must remain inside the real selected destination and must reject child symlink escapes.
 - The Rust `Vault` module owns the destination and `attachments/` directory descriptors; no raw child mutation path or descriptor crosses its interface.
-- Every staging, attachment, probe, cleanup, and note mutation uses descriptor-relative no-follow `rustix` operations; the note is renamed last.
+- The marker-verified `.arthur-workspace-v1/` contains four fixed reusable slots with fixed child names and dual checksummed journals. Workspace children are never deleted with `unlinkat` or `rmdir`; verified held files are reset through descriptors or moved to final no-replace paths and recreated no-replace. Unexpected mismatches quarantine the slot.
+- Every workspace, attachment, probe, and note mutation uses descriptor-relative no-follow `rustix` operations; the note is renamed last.
 - The browser-side Zod schemas are the canonical JSON interface; fields and variants stay wire-compatible, while strict Rust `serde` enums and shared fixtures must match every value constraint.
 - Media IDs are UUIDs generated with browser `crypto.randomUUID()`. Vault rewrites only exact registered UUID placeholders and preserves unknown literal `arthur-media://...` article text.
 - Normalize both the incoming source and every stored frontmatter source in Rust before comparing them.
@@ -65,7 +67,7 @@
 - `native/src/vault/fs.rs`: private descriptor-relative open/create/rename/unlink/sync implementation.
 - `native/src/vault/names.rs`: private filename, extension, and content-addressing implementation.
 - `native/src/vault/frontmatter.rs`: private YAML serialization and normalized source discovery.
-- `native/src/vault/transaction.rs`: private staged-media and commit-last transaction implementation.
+- `native/src/vault/transaction.rs`: private fixed-workspace-slot media and commit-last transaction implementation.
 - `native/src/session.rs`: protocol-order adapter from messages to opaque Vault transactions.
 - `native/src/server.rs`: validated request dispatcher and error mapping.
 - `native/src/lib.rs`: native modules and testable host runner.
@@ -699,13 +701,17 @@ In `native/tests/vault_transaction.rs`, construct `SaveSpec` and `MediaSpec` val
 - Ordered chunks produce byte-identical GIF, animated WebP, SVG, AVIF, MP3, and MP4 attachments.
 - The URL basename plus SHA-256 produces `hero--b7c87d380f4e.webp`; equal content is installed once, while an existing same-name/different-digest file returns `VaultError::AttachmentConflict`.
 - Positive declared lengths must equal completed bytes; zero accepts an unknown final length, including an actually empty file.
-- A deliberately mismatched `chunks` count discards that media's staged file, records `<normalized-source>` as its fallback, and returns `MediaDisposition::Fallback` without aborting the article.
+- A deliberately mismatched `chunks` count resets that held media file, records `<normalized-source>` as its fallback, and returns `MediaDisposition::Fallback` without aborting the article.
 - Out-of-order chunks, unknown/closed media IDs, duplicate `finish_media`, open media at commit, and individual/total limit overflow produce stable typed errors before the note rename.
-- `abort` removes every known staged file and the stage directory using descriptors.
+- `abort` truncates and syncs every verified held workspace file; it never unlinks a workspace pathname.
 - Renaming the visible `attachments/` path and replacing it with an outside symlink after `Vault::open` cannot redirect the transaction: the held descriptor remains the only attachment mutation target.
 - `CommitFault::BeforeNoteRename` leaves the prior note byte-identical; `CommitFault::BeforeFirstAttachmentRename` exposes no note update.
-- A success installs and syncs attachments first, writes/syncs the note temp file, renames the note last, syncs the destination directory, and removes the stage.
+- A success installs and syncs attachments first, writes/syncs the fixed new-note file, renames or exchanges the note last, syncs the destination directory, and resets the verified slot through held descriptors.
 - Matching stored/incoming normalized sources replace the old note in place after a title change; same-title/different-source creates `<stem>--<12-char-source-hash>.md` with no unrelated overwrite.
+- Repeated successful overwrites keep workspace entry count and retained bytes constant; media item 4,097 is rejected without creating another entry.
+- Wrong markers, symlinks, FIFOs, missing fixed children, and replaced slot directories quarantine only that slot. Four ambiguous slots cause a safe typed failure without deleting any substitute.
+- Crash tests cover every journal phase, exchange, directory sync, committed record, and descriptor reset. A torn journal selects the newest valid generation.
+- Swapping any fixed child after validation preserves substitute bytes and resets only Arthur's held FD. The implementation contains no workspace `unlinkat` or `rmdir` path.
 
 - [ ] **Step 2: Run transaction tests and verify RED**
 
@@ -747,11 +753,11 @@ pub struct SavedNote {
 }
 ```
 
-Create `.arthur-stage-<validated-session-uuid>` with `mkdirat(destination_fd, ..., 0700)` and open it with `DIRECTORY | CLOEXEC | NOFOLLOW`. Generate fixed internal temp basenames from a monotonically increasing counter; never use `mediaId`, title, source, or another untrusted string as a mutation path. Decode base64 in the session adapter, but stream bytes here through a descriptor-backed `std::fs::File` while incrementally updating `sha2::Sha256` and all resource counters.
+Create or open `.arthur-workspace-v1/` and four `slot-0`…`slot-3` directories with `mkdirat(..., 0700)` plus exact marker verification. Each slot has fixed `journal-a`, `journal-b`, `new-note`, `old-backup`, and `media-0`…`media-4095` basenames. Create media files lazily with `CREATE | EXCL | NOFOLLOW`, but never create beyond the fixed ceiling. Never use `mediaId`, title, source, or another untrusted string as a mutation path. A path/held-FD identity or type mismatch quarantines the slot without modifying the substitute; if no slot is usable, fail with a redacted typed error. Decode base64 in the session adapter, but stream bytes through descriptor-backed `std::fs::File` values while incrementally updating SHA-256 and all resource counters.
 
-At media finish, close and sync the staged file, compute its private final attachment basename, and retain either a saved mapping or normalized remote fallback mapping for that media ID. Treat a write-failed fallback as open until `end_media` consumes it and returns the warning. At commit, replace every exact registered UUID `arthur-media://<id>` with either `![[attachments/<private-name>]]` or `<normalized-source>`. Preserve unknown literal `arthur-media://...` article text, and reject a registered media ID that has no terminal mapping before any final rename.
+At media finish, sync the held media file, compute its private final attachment basename, and retain either a saved mapping or normalized remote fallback mapping for that media ID. Treat a write-failed fallback as open until `end_media` consumes it and returns the warning. At commit, replace every exact registered UUID `arthur-media://<id>` with either `![[attachments/<private-name>]]` or `<normalized-source>`. Preserve unknown literal `arthur-media://...` article text, and reject a registered media ID that has no terminal mapping before any final rename.
 
-Install each attachment with `renameat_with(..., RenameFlags::NOREPLACE)`. If the name already exists, open it through the attachments descriptor with `NOFOLLOW`, hash it, and reuse only an equal digest. Sync every new attachment and the attachments directory. Serialize the exact two-field note, write it to an exclusive stage file, and call macOS full sync. A matching-source replacement must use a recoverable descriptor-relative exchange/compare design tied to the verified inode; a race must preserve both files and return a conflict rather than overwrite an unrelated note. New notes use `renameat_with(..., NOREPLACE)`. Rename the note last, sync the destination directory, then treat cleanup as recoverable best effort. Every stage persists a synced Arthur ownership marker before content. Reapers delete only marker-verified Arthur stages; unverified reapers are preserved. A process killed before the note rename leaves the previous note intact, and a process killed during a recoverable exchange is repaired on the next `Vault::open` without deleting unrelated content.
+Install each attachment with `renameat_with(..., RenameFlags::NOREPLACE)`. If the name already exists, open it through the attachments descriptor with `NOFOLLOW`, hash it, retain the held workspace authority, and reuse only an equal digest after a final identity check. Sync every new attachment and the attachments directory. Serialize the exact two-field note into fixed `new-note` and call macOS full sync. Copy a matching old note byte-identically through its held FD into fixed `old-backup`, sync it, then persist the next dual-journal generation before any exchange. Journals contain only phase, generation, fixed child identities, target basename, and SHA-256 checksum. A matching-source replacement uses a reversible descriptor-relative exchange/compare design; a race restores authoritative old bytes and preserves substitutes without unlinking them. New notes use `renameat_with(..., NOREPLACE)`. Rename or exchange the note last and sync the destination directory. Recovery selects the newest valid journal generation and handles empty, preparing, exchange-pending, and committed phases. After durable success or abort, reset exact held Arthur files using `set_len`, write, and sync. A verified held media or new-note file may be moved to its final no-replace path; recreate its now-missing fixed slot file no-replace before reuse. Never `unlinkat` or `rmdir` a workspace entry. A process killed before note visibility leaves the previous note intact; recovery never deletes unrelated content and retained workspace size is globally bounded.
 
 - [ ] **Step 4: Write failing session, dispatcher, and real-process tests**
 
@@ -788,7 +794,7 @@ Use a standard-library `HashMap<String, VaultTransaction>` in `SessionManager`; 
 
 Map errors to stable codes: `invalid_message`, `protocol_version_mismatch`, `invalid_destination`, `unsafe_child`, `session_not_found`, `invalid_transition`, `invalid_chunk`, `media_limit_exceeded`, `media_fallback`, `attachment_conflict`, and `commit_failed`. Messages must be actionable but path/content-redacted.
 
-`run_native_host` reads bounded chunks, feeds one `FrameDecoder`, parses every value with `parse_client`, dispatches it, validates/serializes the `HostMessage`, and flushes one frame. On framing/UTF-8/JSON failure, write at most one `invalid_native_frame` error frame and return `InvalidData`; never call `push` again. On EOF, call `FrameDecoder::finish`: an empty buffer is normal, while a partial header/body is a poisoned `TruncatedFrame` and gets the same one-error/exit treatment. On normal EOF or input/output error, call `abort_all`. The binary `main` passes locked stdin/stdout/stderr handles to the runner. A normal EOF with no active transaction exits 0 and writes nothing. Default macOS `SIGTERM` termination needs no signal dependency: commit-last guarantees no partial note, and the next `Vault::open` reclaims a stale stage.
+`run_native_host` reads bounded chunks, feeds one `FrameDecoder`, parses every value with `parse_client`, dispatches it, validates/serializes the `HostMessage`, and flushes one frame. On framing/UTF-8/JSON failure, write at most one `invalid_native_frame` error frame and return `InvalidData`; never call `push` again. On EOF, call `FrameDecoder::finish`: an empty buffer is normal, while a partial header/body is a poisoned `TruncatedFrame` and gets the same one-error/exit treatment. On normal EOF or input/output error, call `abort_all`. The binary `main` passes locked stdin/stdout/stderr handles to the runner. A normal EOF with no active transaction exits 0 and writes nothing. Default macOS `SIGTERM` termination needs no signal dependency: commit-last guarantees no partial note, and the next `Vault::open` recovers or quarantines the fixed slot from its dual journals.
 
 - [ ] **Step 7: Verify the native module and commit**
 

@@ -106,7 +106,7 @@ The helper is one self-contained Rust macOS binary. It uses the browser native-m
 
 Frame decoding is fail-closed. Browser-to-host request frames are capped at 64 MiB, matching the strictest supported browser direction; host-to-browser response frames remain capped at 1 MiB. Markdown is capped at 10 MiB UTF-16 units so even worst-case JSON escaping plus the bounded envelope fits the 64 MiB request frame. After any invalid length, truncated frame at EOF, other framing failure, UTF-8 failure, or JSON failure, the decoder becomes permanently poisoned, emits at most one typed error, accepts no later frame, and the host exits. Protocol output is written only to stdout; diagnostics are written only to stderr.
 
-The native filesystem seam is a deep `Vault` module with a small interface. Its implementation opens and owns the selected destination and lowercase `attachments/` directory descriptors. Save transactions remain opaque outside the module: raw child mutation paths and directory descriptors never cross its interface. Staging, attachment installation, note replacement, cleanup, scanning, and write probes use descriptor-relative, no-follow `rustix` operations (`openat`, `mkdirat`, `renameat`/`renameat_with`, `unlinkat`, `statat`, and descriptor syncs).
+The native filesystem seam is a deep `Vault` module with a small interface. Its implementation opens and owns the selected destination, lowercase `attachments/`, and marker-verified `.arthur-workspace-v1/` descriptors. Save transactions remain opaque outside the module: raw child mutation paths and directory descriptors never cross its interface. The workspace has four fixed reusable slots and at most 4,096 media files per slot. Slots use fixed child names, dual generation-numbered SHA-256-checksummed journals, and held files that are reset with descriptor operations. Workspace entries are never deleted with `unlinkat` or `rmdir`; a verified held file may be atomically moved to its final no-replace path and the now-missing fixed file recreated with no-replace. Any unexpected path/descriptor mismatch quarantines that slot. Attachment installation, note replacement, scanning, and write probes remain descriptor-relative and no-follow.
 
 The protocol supports:
 
@@ -118,7 +118,7 @@ The protocol supports:
 - Save commit.
 - Typed success, warning, and failure responses.
 
-Each media stream is written to a temporary file while the helper incrementally calculates SHA-256. The helper therefore does not retain whole audio or video files in memory.
+Each media stream is written to its held workspace-slot file while the helper incrementally calculates SHA-256. The helper therefore does not retain whole audio or video files in memory.
 
 ## Save Transaction
 
@@ -127,12 +127,12 @@ Each media stream is written to a temporary file while the helper incrementally 
 3. Readability extracts the article; DOMPurify sanitizes it; Turndown produces Markdown.
 4. The coordinator preflights retained media responses and resolves fetch, HTTP, streaming, and known-size fallbacks.
 5. The coordinator opens a validated save session with the helper using Markdown whose remaining placeholders correspond only to eligible media.
-6. Each eligible media response is streamed in bounded chunks to a staged file.
+6. Each eligible media response is streamed in bounded chunks to a fixed workspace-slot file.
 7. The helper determines each final content-addressed attachment name.
 8. The Vault transaction finalizes Markdown placeholders from its internal successful-media mapping and remote-link fallback mapping.
 9. The Vault implementation moves new attachment files into `attachments/` with descriptor-relative same-filesystem renames.
 10. The Vault implementation atomically replaces or creates the article note last.
-11. The helper cleans the staging area and returns success or warnings.
+11. The helper resets its held workspace files and returns success or warnings.
 12. The extension updates the badge and optional status details.
 
 Writing the note last prevents Arthur from exposing a newly updated note whose new local attachments are absent. Content-addressed attachments are immutable and safe to reuse. A failure before the note rename leaves the previous note intact.
@@ -145,8 +145,9 @@ Every value received by the helper is untrusted. The helper must:
 - Resolve the selected directory once, open it as a no-follow directory descriptor, and perform every child mutation relative to owned directory descriptors.
 - Allow the selected directory itself to resolve through a legitimate symlink, but reject child-target symlink escapes.
 - Reject traversal, absolute child paths, NUL bytes, empty filenames, control characters, and platform-unsafe filename forms.
-- Create only its staging directory and the lowercase `attachments/` directory beneath the selected folder.
-- Use descriptor-relative no-follow opens, exclusive temporary-file creation, no-replace attachment installation, same-filesystem renames, and descriptor syncs.
+- Create only its fixed `.arthur-workspace-v1/` hierarchy and the lowercase `attachments/` directory beneath the selected folder.
+- Never delete workspace children with `unlinkat` or `rmdir`. Reset verified held file descriptors, or move a verified held file to a final no-replace path and recreate the missing fixed file no-replace; quarantine a slot on any unexpected fixed-path identity or type mismatch.
+- Use descriptor-relative no-follow opens, exclusive fixed-slot file creation, no-replace attachment installation, reversible same-filesystem exchanges, and descriptor syncs.
 - Validate protocol message order, identifiers, declared sizes, chunk sizes, and completed byte counts.
 - Write protocol output only to stdout and diagnostics only to stderr.
 - Accept connections only from the configured Arthur extension IDs through browser native-host manifests.
@@ -157,6 +158,8 @@ Resource limits are:
 - 100 MiB per image.
 - 2 GiB per direct audio or video file.
 - 4 GiB total media per save.
+- 4,096 media items per save.
+- Four fixed workspace slots; ambiguous slots are quarantined and saving fails safely when none remain.
 - 10 MiB UTF-16 units of Markdown per save.
 - 64 MiB per browser-to-host request frame and 1 MiB per host-to-browser response frame.
 
