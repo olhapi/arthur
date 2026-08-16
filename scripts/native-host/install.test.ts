@@ -12,6 +12,7 @@ async function fixture() {
   const home = path.join(root, "home");
   const repositoryPath = path.join(root, "repo");
   const nativeBinaryPath = path.join(repositoryPath, "native", "target", "release", "arthur-native-host");
+  await mkdir(home, { recursive: true });
   await mkdir(path.dirname(nativeBinaryPath), { recursive: true });
   await writeFile(nativeBinaryPath, "native-host");
   return { home, repositoryPath, nativeBinaryPath };
@@ -21,12 +22,12 @@ describe("native-host installation plan", () => {
   it("contains one direct Rust binary and three exact user-level manifests", async () => {
     const options = await fixture();
     const plan = await buildInstallPlan({ ...options, platform: "darwin" });
-    const binary = path.join(options.home, "Library/Application Support/Arthur/native-host/arthur-native-host");
+    const binary = path.join(plan.home, "Library/Application Support/Arthur/native-host/arthur-native-host");
     expect(plan.payloads).toEqual([{ source: options.nativeBinaryPath, destination: binary, mode: 0o755 }]);
     expect(plan.manifests.map((manifest) => manifest.destination)).toEqual([
-      path.join(options.home, "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.olhapi.arthur.json"),
-      path.join(options.home, "Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.olhapi.arthur.json"),
-      path.join(options.home, "Library/Application Support/Mozilla/NativeMessagingHosts/com.olhapi.arthur.json"),
+      path.join(plan.home, "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.olhapi.arthur.json"),
+      path.join(plan.home, "Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.olhapi.arthur.json"),
+      path.join(plan.home, "Library/Application Support/Mozilla/NativeMessagingHosts/com.olhapi.arthur.json"),
     ]);
     expect(plan.manifests[0]?.contents.allowed_origins).toEqual([`chrome-extension://${CHROMIUM_EXTENSION_ID}/`]);
     expect(plan.manifests[1]?.contents.path).toBe(binary);
@@ -52,6 +53,8 @@ describe("native-host installation plan", () => {
     const plan = await buildInstallPlan({ ...options, platform: "darwin" });
     const renames: Array<[string, string]> = [];
     await applyInstallPlan(plan, {
+      home: options.home,
+      platform: "darwin",
       fs: {
         ...await import("node:fs/promises"),
         rename: async (from: string, to: string) => {
@@ -70,15 +73,28 @@ describe("native-host installation plan", () => {
     const options = await fixture();
     const plan = await buildInstallPlan({ ...options, platform: "darwin" });
     plan.payloads[0]!.destination = path.join(options.home, "escape");
-    await expect(applyInstallPlan(plan)).rejects.toThrow(/allowlist/i);
+    await expect(applyInstallPlan(plan, { home: options.home, platform: "darwin" })).rejects.toThrow(/allowlist/i);
+  });
+
+  it("recomputes its allowlist rather than trusting a fully forged plan", async () => {
+    const options = await fixture();
+    const plan = await buildInstallPlan({ ...options, platform: "darwin" });
+    const forged = path.join(options.home, "forged", "arthur-native-host");
+    plan.targets = { binary: forged, chrome: `${forged}.chrome`, edge: `${forged}.edge`, firefox: `${forged}.firefox` };
+    plan.payloads[0]!.destination = forged;
+    for (const [index, manifest] of plan.manifests.entries()) {
+      manifest.destination = [plan.targets.chrome, plan.targets.edge, plan.targets.firefox][index]!;
+      manifest.contents.path = forged;
+    }
+    await expect(applyInstallPlan(plan, { home: options.home, platform: "darwin" })).rejects.toThrow(/allowlist|home/i);
   });
 
   it("uninstalls only the four exact Arthur files", async () => {
     const options = await fixture();
     const plan = await buildInstallPlan({ ...options, platform: "darwin" });
-    await applyInstallPlan(plan);
+    await applyInstallPlan(plan, { home: options.home, platform: "darwin" });
     const uninstall = await buildUninstallPlan({ home: options.home, platform: "darwin" });
-    await applyUninstallPlan(uninstall);
+    await applyUninstallPlan(uninstall, { home: options.home, platform: "darwin" });
     for (const target of uninstall.targets) await expect(readFile(target)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(buildUninstallPlan({ home: options.home, platform: "darwin", targets: ["/tmp/escape"] })).rejects.toThrow(/allowlist/i);
   });

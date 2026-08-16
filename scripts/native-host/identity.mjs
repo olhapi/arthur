@@ -21,6 +21,9 @@ function decodePublicDer(publicKeyBase64) {
     if (key.asymmetricKeyType !== "rsa" || key.asymmetricKeyDetails?.modulusLength !== 2048) {
       throw new TypeError("Chromium public key must be a 2048-bit RSA DER key.");
     }
+    if (!Buffer.from(key.export({ format: "der", type: "spki" })).equals(der)) {
+      throw new TypeError("Chromium public key DER must not contain trailing data.");
+    }
   } catch (error) {
     if (error instanceof TypeError) throw error;
     throw new TypeError("Chromium public key must be valid DER.");

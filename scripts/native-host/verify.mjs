@@ -3,10 +3,11 @@ import * as nodeFs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { FIREFOX_EXTENSION_ID, NATIVE_HOST_NAME, assertRegularNonSymlink, nativeHostTargets } from "./install.mjs";
+import { FIREFOX_EXTENSION_ID, NATIVE_HOST_NAME, assertRegularNonSymlink, canonicalizeHome, nativeHostTargets, validateDirectoryChain } from "./install.mjs";
 import { CHROMIUM_EXTENSION_ID } from "./identity.mjs";
 
 const MINIMAL_ENV = { PATH: "/usr/bin:/bin" };
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 function missing(error) {
   return error && typeof error === "object" && error.code === "ENOENT";
@@ -23,7 +24,8 @@ function exactJson(actual, expected, label) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`${label} does not match Arthur's required native-host manifest.`);
 }
 
-async function readManifest(fs, pathname, expected, label) {
+async function readManifest(fs, home, pathname, expected, label) {
+  await validateDirectoryChain(fs, home, path.dirname(pathname));
   await assertRegularNonSymlink(fs, pathname, label);
   let parsed;
   try { parsed = JSON.parse(await fs.readFile(pathname, "utf8")); } catch { throw new Error(`${label} contains invalid JSON.`); }
@@ -41,7 +43,9 @@ function parseSingleFrame(bytes) {
   if (bytes.length < 4) throw new Error("Native host returned a malformed framed response.");
   const length = bytes.readUInt32LE(0);
   if (length === 0 || length > 1024 * 1024 || bytes.length !== length + 4) throw new Error("Native host returned malformed or noisy stdout.");
-  try { return JSON.parse(bytes.subarray(4).toString("utf8")); } catch { throw new Error("Native host returned malformed JSON."); }
+  let text;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(4)); } catch { throw new Error("Native host returned invalid UTF-8."); }
+  try { return JSON.parse(text); } catch { throw new Error("Native host returned malformed JSON."); }
 }
 
 export function requestHost(spawn, binary, request) {
@@ -49,13 +53,47 @@ export function requestHost(spawn, binary, request) {
     const child = spawn(binary, [], { env: MINIMAL_ENV, stdio: ["pipe", "pipe", "pipe"] });
     const stdout = [];
     const stderr = [];
-    child.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let header = Buffer.alloc(0);
+    let responseLength;
+    let stdoutBytes = 0;
+    let failed = false;
+    const fail = (error) => {
+      if (failed) return;
+      failed = true;
+      child.kill?.();
+      reject(error);
+    };
+    child.stdout.on("data", (chunk) => {
+      if (failed) return;
+      const bytes = Buffer.from(chunk);
+      stdoutBytes += bytes.length;
+      if (stdoutBytes > MAX_RESPONSE_BYTES) return fail(new Error("Native host response exceeds 1 MiB."));
+      try {
+        let payload = bytes;
+        if (responseLength === undefined) {
+          header = Buffer.concat([header, bytes]);
+          if (header.length < 4) {
+            stdout.push(bytes);
+            return;
+          }
+          responseLength = header.readUInt32LE(0);
+          payload = header.subarray(4);
+        }
+        decoder.decode(payload, { stream: true });
+      } catch { return fail(new Error("Native host returned invalid UTF-8.")); }
+      stdout.push(bytes);
+    });
     child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
-    child.on("error", reject);
+    child.on("error", fail);
     child.on("close", (code) => {
+      if (failed) return;
       if (code !== 0) return reject(new Error("Native host exited unsuccessfully."));
       if (Buffer.concat(stderr).length !== 0) return reject(new Error("Native host wrote diagnostics during verification."));
-      try { resolve(parseSingleFrame(Buffer.concat(stdout))); } catch (error) { reject(error); }
+      try {
+        decoder.decode();
+        resolve(parseSingleFrame(Buffer.concat(stdout)));
+      } catch (error) { reject(error instanceof Error ? error : new Error("Native host returned invalid UTF-8.")); }
     });
     child.stdin.on("error", reject);
     child.stdin.end(frame(request));
@@ -74,15 +112,17 @@ async function assertAbsent(fs, targets) {
 }
 
 export async function verifyInstall({ home, platform, destination, expectAbsent = false, fs = nodeFs, spawn = nodeSpawn } = {}) {
-  const targets = nativeHostTargets({ home, platform });
+  const canonicalHome = await canonicalizeHome(fs, home);
+  const targets = nativeHostTargets({ home: canonicalHome, platform });
   if (expectAbsent) {
     if (destination !== undefined) throw new Error("--expect-absent cannot be combined with a destination test.");
     await assertAbsent(fs, targets);
     return { installed: false, absent: true };
   }
-  await readManifest(fs, targets.chrome, expectedManifest(targets.binary, "chromium"), "Chrome manifest");
-  await readManifest(fs, targets.edge, expectedManifest(targets.binary, "chromium"), "Edge manifest");
-  await readManifest(fs, targets.firefox, expectedManifest(targets.binary, "firefox"), "Firefox manifest");
+  await validateDirectoryChain(fs, canonicalHome, path.dirname(targets.binary));
+  await readManifest(fs, canonicalHome, targets.chrome, expectedManifest(targets.binary, "chromium"), "Chrome manifest");
+  await readManifest(fs, canonicalHome, targets.edge, expectedManifest(targets.binary, "chromium"), "Edge manifest");
+  await readManifest(fs, canonicalHome, targets.firefox, expectedManifest(targets.binary, "firefox"), "Firefox manifest");
   await assertRegularNonSymlink(fs, targets.binary, "Installed native-host binary");
   const binaryStat = await fs.lstat(targets.binary);
   if ((binaryStat.mode & 0o777) !== 0o755) throw new Error("Installed native-host binary must have mode 0755.");
@@ -94,7 +134,7 @@ export async function verifyInstall({ home, platform, destination, expectAbsent 
   }
   if (destination === undefined) return { installed: true };
   if (!path.isAbsolute(destination)) throw new Error("Destination test path must be absolute.");
-  const normalizedDestination = path.resolve(destination);
+  const normalizedDestination = await fs.realpath(path.resolve(destination));
   const result = await requestHost(spawn, targets.binary, { type: "test_destination", requestId: "verify-destination", destination: normalizedDestination });
   if (!result || result.type !== "test_destination_result" || result.requestId !== "verify-destination" || result.destination !== normalizedDestination || result.writable !== true) {
     throw new Error("Native host destination test did not confirm the exact writable destination.");

@@ -41,3 +41,12 @@ Library/Application Support/Mozilla/NativeMessagingHosts/com.olhapi.arthur.json
 ```
 
 The direct framed hello and destination test succeeded with the minimal environment. Bounded uninstall followed by `--expect-absent` succeeded. No real browser configuration was modified.
+
+## Review fix round 1
+
+- Recomputed installation and uninstall targets from an injected, canonicalized home at application time; forged complete plans cannot select arbitrary write/delete paths.
+- Added one-segment-at-a-time non-symlink directory validation before descendant filesystem operations. Same-user concurrent path replacement is explicitly outside this task's threat model.
+- Re-exported parsed SPKI DER for byte equality, rejecting trailing public-key data.
+- Capped host stdout at 1 MiB, uses fatal UTF-8 decoding for the framed JSON payload, and rejects malformed/noisy output before accepting a reply.
+- Destination verification now canonicalizes through the injected filesystem, permitting legitimate selected-destination symlinks.
+- Added focused forged-plan, trailing-DER, framing, no-spawn absence, and destination-symlink coverage.

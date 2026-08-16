@@ -15,4 +15,9 @@ describe("Chromium native-host identity", () => {
     expect(() => getChromiumExtensionId("not base64")).toThrow(/base64|DER|public key/i);
     expect(() => getChromiumExtensionId(Buffer.from("not a DER key").toString("base64"))).toThrow(/DER|public key/i);
   });
+
+  it("rejects DER with trailing bytes after a valid public key", () => {
+    const trailing = Buffer.concat([Buffer.from(CHROMIUM_PUBLIC_KEY_DER_BASE64, "base64"), Buffer.from([0])]).toString("base64");
+    expect(() => getChromiumExtensionId(trailing)).toThrow(/DER|public key/i);
+  });
 });
