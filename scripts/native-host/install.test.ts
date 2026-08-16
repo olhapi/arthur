@@ -137,6 +137,17 @@ describe("native-host installation plan", () => {
     await expect(applyUninstallPlan(bounded, { home: nonDirectory.home, platform: "darwin" })).rejects.toThrow(/directory/i);
   });
 
+  it("rejects a symlink ancestor during uninstall before any unlink or rmdir", async () => {
+    const options = await fixture();
+    const uninstall = await buildUninstallPlan({ home: options.home, platform: "darwin" });
+    await symlink("/tmp", path.join(options.home, "Library"));
+    const unlink = vi.fn(nodeFs.unlink);
+    const rmdir = vi.fn(nodeFs.rmdir);
+    await expect(applyUninstallPlan(uninstall, { home: options.home, platform: "darwin", fs: { ...nodeFs, unlink, rmdir } })).rejects.toThrow(/directory/i);
+    expect(unlink).not.toHaveBeenCalled();
+    expect(rmdir).not.toHaveBeenCalled();
+  });
+
   it("does not rename when exclusive staging write, fsync, or close fails", async () => {
     for (const failure of ["open", "writeFile", "sync", "close"] as const) {
       const options = await fixture();

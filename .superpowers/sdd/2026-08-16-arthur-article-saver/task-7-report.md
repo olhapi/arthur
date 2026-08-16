@@ -58,3 +58,8 @@ The direct framed hello and destination test succeeded with the minimal environm
 - Extended focused coverage for forged uninstall plans, manifest and ancestor symlinks, all staging open/write/fsync/close failure paths and cleanup, malformed manifest variants including wrong paths, missing/symlink release sources, binary-mode and payload inventory checks, partial/absent uninstall, oversized headers, and destination mismatch.
 - Added a committed integration test that uses `native/target/release/arthur-native-host` with a fake home for install, real minimal-PATH framed hello, canonical destination verification, bounded uninstall, and absence verification. It fails clearly if `pnpm build:native` has not produced the release binary.
 - Final focused lifecycle suite: 114 tests passing.
+
+## Review fix round 4
+
+- Added a direct bounded-uninstall ancestor-symlink regression test. It proves rejection occurs before any `unlink` or `rmdir`, complementing the existing direct non-directory ancestor rejection test.
+- Final focused lifecycle suite: 115 tests passing.
