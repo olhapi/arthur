@@ -8,6 +8,7 @@ use url::Url;
 const CHUNK_BYTES: usize = 256 * 1024;
 const IMAGE_LIMIT: u64 = 100 * 1024 * 1024;
 const AUDIO_VIDEO_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -159,6 +160,12 @@ fn bounded(value: &mut String, max: usize) -> bool {
 fn optional_bounded(value: &mut Option<String>, max: usize) -> bool {
     value.as_mut().is_none_or(|value| bounded(value, max))
 }
+fn js_safe_integer(value: u64) -> bool {
+    value <= MAX_JS_SAFE_INTEGER
+}
+fn optional_js_safe_integer(value: Option<u64>) -> bool {
+    value.is_none_or(js_safe_integer)
+}
 fn uuid(value: &str) -> bool {
     let value = value.as_bytes();
     if value.len() != 36
@@ -189,8 +196,11 @@ fn absolute(value: &mut String) -> bool {
 }
 pub fn normalize_source(value: &str) -> Result<String, ProtocolError> {
     let value = trim_js(value);
+    if js_length(&value) > 2048 {
+        return Err(ProtocolError::Invalid);
+    }
     let mut url = Url::parse(&value).map_err(|_| ProtocolError::Invalid)?;
-    if !matches!(url.scheme(), "http" | "https") || js_length(&value) > 2048 {
+    if !matches!(url.scheme(), "http" | "https") {
         return Err(ProtocolError::Invalid);
     }
     url.set_fragment(None);
@@ -210,7 +220,10 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
             request_id,
             protocol_version,
         } => {
-            if !bounded(request_id, 128) || *protocol_version != 1 {
+            if !bounded(request_id, 128)
+                || !js_safe_integer(*protocol_version)
+                || *protocol_version != 1
+            {
                 return Err(ProtocolError::Invalid);
             }
         }
@@ -257,6 +270,7 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
                 || !uuid(session_id)
                 || !bounded(media_id, 128)
                 || !mime(content_type)
+                || !js_safe_integer(*byte_length)
                 || *byte_length > max
             {
                 return Err(ProtocolError::Invalid);
@@ -266,10 +280,11 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
         ClientMessage::MediaChunk {
             session_id,
             media_id,
+            sequence,
             data,
             ..
         } => {
-            if !uuid(session_id) || !bounded(media_id, 128) {
+            if !uuid(session_id) || !bounded(media_id, 128) || !js_safe_integer(*sequence) {
                 return Err(ProtocolError::Invalid);
             }
             if data.is_empty() {
@@ -292,9 +307,14 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
             request_id,
             session_id,
             media_id,
+            chunks,
             ..
         } => {
-            if !bounded(request_id, 128) || !uuid(session_id) || !bounded(media_id, 128) {
+            if !bounded(request_id, 128)
+                || !uuid(session_id)
+                || !bounded(media_id, 128)
+                || !js_safe_integer(*chunks)
+            {
                 return Err(ProtocolError::Invalid);
             }
         }
@@ -326,6 +346,7 @@ fn validate_host(message: &mut HostMessage) -> Result<(), ProtocolError> {
             host_name,
             host_version,
         } => (bounded(request_id, 128)
+            && js_safe_integer(*protocol_version)
             && *protocol_version == 1
             && bounded(host_name, 255)
             && bounded(host_version, 128))
@@ -349,10 +370,11 @@ fn validate_host(message: &mut HostMessage) -> Result<(), ProtocolError> {
             request_id,
             session_id,
             media_id,
-            ..
+            sequence,
         } => (bounded(request_id, 128)
             && session_id.as_deref().is_none_or(uuid)
-            && optional_bounded(media_id, 128))
+            && optional_bounded(media_id, 128)
+            && optional_js_safe_integer(*sequence))
         .then_some(())
         .ok_or(ProtocolError::Invalid),
         HostMessage::Warning {

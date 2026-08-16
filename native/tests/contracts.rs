@@ -178,3 +178,37 @@ fn measures_zod_string_limits_in_javascript_utf16_code_units() {
     }))
     .is_err());
 }
+
+#[test]
+fn applies_the_source_utf16_limit_before_url_normalization() {
+    let source = format!("https://example.test/{}", "é".repeat(1000));
+    assert_eq!(source.encode_utf16().count(), 1021);
+    let message = parse_client(serde_json::json!({
+        "type": "begin_save",
+        "requestId": "r",
+        "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987",
+        "destination": "/tmp/Arthur",
+        "source": source,
+        "title": "Article",
+        "markdown": "Body"
+    }))
+    .unwrap();
+    let ClientMessage::BeginSave { source, .. } = message else {
+        panic!("expected begin_save");
+    };
+    assert!(source.len() > 2048);
+
+    let too_long = format!("https://example.test/{}", "é".repeat(2028));
+    assert!(
+        parse_client(serde_json::json!({
+            "type": "begin_save",
+            "requestId": "r",
+            "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987",
+            "destination": "/tmp/Arthur",
+            "source": too_long,
+            "title": "Article",
+            "markdown": "Body"
+        }))
+        .is_err()
+    );
+}

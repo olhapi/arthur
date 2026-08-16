@@ -156,6 +156,30 @@ mod tests {
     }
 
     #[test]
+    fn accepts_a_protocol_normalized_long_percent_encoded_source() {
+        let raw = format!("https://example.test/{}", "é".repeat(1000));
+        assert_eq!(raw.encode_utf16().count(), 1021);
+        let normalized = crate::protocol::normalize_source(&raw).unwrap();
+        assert!(normalized.len() > 2048);
+
+        let destination = temp();
+        fs::write(
+            destination.join("long-source.md"),
+            serialize_note("Article", &normalized, "Body").unwrap(),
+        )
+        .unwrap();
+        let vault = Vault::open(&destination).unwrap();
+
+        assert_eq!(
+            find_existing_article(&vault.destination, &normalized).unwrap(),
+            Some("long-source.md".to_owned())
+        );
+
+        drop(vault);
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
     fn serializes_only_a_normalized_http_source() {
         assert_eq!(
             serialize_note("A \"title\"", "https://example.test/a", "Body\n").unwrap(),

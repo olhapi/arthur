@@ -3,9 +3,22 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use url::Url;
 
-const RECOGNIZED_EXTENSIONS: &[&str] = &[
+// These are the finite audio/video and core-image lists in
+// `src/article/resources.ts`. Keeping this independent of MIME keeps a
+// recognized URL suffix intact when a server reports `application/octet-stream`.
+const CLASSIFIED_MEDIA_EXTENSIONS: &[&str] = &[
     "aac", "avif", "flac", "gif", "jpeg", "jpg", "m4a", "m4v", "mov", "mp3", "mp4", "ogg", "ogv",
     "opus", "png", "svg", "wav", "weba", "webm", "webp",
+];
+
+// The rendered-resource classifier treats an `IMG` source as an image even
+// when its suffix is not in its core list. Preserve this deliberately bounded
+// set of standard image URL aliases; each family has an explicit MIME fallback
+// below. It covers animated PNG, BMP, icons, TIFF, modern image formats, and
+// common JPEG/JPEG-2000/SVG aliases without accepting arbitrary suffixes.
+const BROWSER_IMAGE_URL_EXTENSIONS: &[&str] = &[
+    "apng", "bmp", "cur", "dib", "heic", "heif", "ico", "jfif", "jpe", "jp2", "jpf", "jpm", "jpx",
+    "jxl", "svgz", "tif", "tiff",
 ];
 
 #[allow(dead_code)]
@@ -19,11 +32,19 @@ fn mime_extension(value: &str) -> &'static str {
         "audio/opus" => "opus",
         "audio/wav" => "wav",
         "audio/webm" => "weba",
+        "image/apng" => "apng",
         "image/avif" => "avif",
+        "image/bmp" | "image/x-bmp" | "image/x-ms-bmp" => "bmp",
         "image/gif" => "gif",
+        "image/heic" => "heic",
+        "image/heif" => "heif",
+        "image/ico" | "image/vnd.microsoft.icon" | "image/x-icon" => "ico",
         "image/jpeg" => "jpg",
+        "image/jp2" | "image/x-jp2" => "jp2",
+        "image/jxl" => "jxl",
         "image/png" => "png",
         "image/svg+xml" => "svg",
+        "image/tiff" => "tiff",
         "image/webp" => "webp",
         "video/mp4" => "mp4",
         "video/ogg" => "ogv",
@@ -35,14 +56,43 @@ fn mime_extension(value: &str) -> &'static str {
 }
 
 fn recognized_extension(value: &str) -> bool {
-    RECOGNIZED_EXTENSIONS.contains(&value) || value == "bin"
+    CLASSIFIED_MEDIA_EXTENSIONS.contains(&value)
+        || BROWSER_IMAGE_URL_EXTENSIONS.contains(&value)
+        || value == "bin"
+}
+
+fn is_unicode_format(value: char) -> bool {
+    matches!(
+        value,
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
 }
 
 #[allow(dead_code)]
 pub(super) fn normalize_source(value: &str) -> Result<String, VaultError> {
     let value = value.trim();
     let mut url = Url::parse(value).map_err(|_| VaultError::InvalidSource)?;
-    if value.len() > 2048 || !matches!(url.scheme(), "http" | "https") {
+    if !matches!(url.scheme(), "http" | "https") {
         return Err(VaultError::InvalidSource);
     }
     url.set_fragment(None);
@@ -53,7 +103,9 @@ pub(super) fn validate_basename(value: &str) -> Result<(), VaultError> {
     if value.is_empty()
         || matches!(value, "." | "..")
         || value.contains('\0')
-        || value.chars().any(char::is_control)
+        || value
+            .chars()
+            .any(|character| character.is_control() || is_unicode_format(character))
         || value.contains(['/', '\\'])
         || Path::new(value).is_absolute()
     {
@@ -89,7 +141,11 @@ pub(super) fn media_stem_and_extension(
 pub(super) fn sanitize_stem(value: &str) -> String {
     let mut value: String = value
         .chars()
-        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | ':' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .filter(|&character| {
+            !character.is_control()
+                && !is_unicode_format(character)
+                && !matches!(character, '/' | '\\' | ':')
+        })
         .collect();
     value = value
         .trim_matches(|c: char| c == '.' || c.is_whitespace())
@@ -177,6 +233,57 @@ mod tests {
     }
 
     #[test]
+    fn rejects_and_strips_all_unicode_format_controls() {
+        let controls = [
+            '\u{00ad}',
+            '\u{0600}',
+            '\u{0605}',
+            '\u{061c}',
+            '\u{06dd}',
+            '\u{070f}',
+            '\u{0890}',
+            '\u{0891}',
+            '\u{08e2}',
+            '\u{180e}',
+            '\u{200b}',
+            '\u{200c}',
+            '\u{200d}',
+            '\u{200e}',
+            '\u{200f}',
+            '\u{202a}',
+            '\u{202e}',
+            '\u{2060}',
+            '\u{2064}',
+            '\u{2066}',
+            '\u{206f}',
+            '\u{feff}',
+            '\u{fff9}',
+            '\u{fffb}',
+            '\u{110bd}',
+            '\u{110cd}',
+            '\u{13430}',
+            '\u{1343f}',
+            '\u{1bca0}',
+            '\u{1bca3}',
+            '\u{1d173}',
+            '\u{1d17a}',
+            '\u{e0001}',
+            '\u{e0020}',
+            '\u{e007f}',
+        ];
+        for control in controls {
+            assert_eq!(
+                validate_basename(&format!("note{control}.md")).err(),
+                Some(VaultError::InvalidName),
+                "U+{:04X}",
+                control as u32,
+            );
+        }
+        let controls: String = controls.into_iter().collect();
+        assert_eq!(sanitize_stem(&format!("safe{controls}name")), "safename");
+    }
+
+    #[test]
     fn derives_stem_and_extension_from_the_media_url_then_mime() {
         assert_eq!(
             media_stem_and_extension(
@@ -229,6 +336,43 @@ mod tests {
                 media_stem_and_extension(source, content_type).unwrap().1,
                 expected,
                 "{source} / {content_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_browser_image_extensions_and_uses_explicit_mime_fallbacks() {
+        for extension in [
+            "apng", "bmp", "dib", "heic", "heif", "ico", "jfif", "jpe", "jxl", "svgz", "tif",
+            "tiff",
+        ] {
+            assert_eq!(
+                media_stem_and_extension(
+                    &format!("https://example.test/hero.{extension}"),
+                    "application/octet-stream",
+                )
+                .unwrap()
+                .1,
+                extension,
+            );
+        }
+        for (content_type, extension) in [
+            ("image/apng", "apng"),
+            ("image/bmp", "bmp"),
+            ("image/x-ms-bmp", "bmp"),
+            ("image/heic", "heic"),
+            ("image/heif", "heif"),
+            ("image/vnd.microsoft.icon", "ico"),
+            ("image/x-icon", "ico"),
+            ("image/jxl", "jxl"),
+            ("image/tiff", "tiff"),
+        ] {
+            assert_eq!(
+                media_stem_and_extension("https://example.test/download", content_type)
+                    .unwrap()
+                    .1,
+                extension,
+                "{content_type}",
             );
         }
     }
