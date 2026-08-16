@@ -9,5 +9,6 @@
     "moduleResolution": "NodeNext",
     "noEmit": true
   },
-  "include": ["src/shared/**/*.ts", "wxt.config.ts", "vitest.config.ts"]
+  "include": ["src/shared/**/*.ts", "src/article/**/*.ts", "wxt.config.ts", "vitest.config.ts"],
+  "exclude": ["src/article/**/*.test.ts"]
 }

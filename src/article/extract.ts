@@ -104,6 +104,22 @@ function articleContentDocument(document: Document, content: string): Document {
   return result;
 }
 
+function applyRenderedSourceSnapshot(source: Document, clone: Document): void {
+  const sourceMedia = source.querySelectorAll<HTMLImageElement | HTMLAudioElement | HTMLVideoElement>(
+    "img, audio, video",
+  );
+  const clonedMedia = clone.querySelectorAll<HTMLImageElement | HTMLAudioElement | HTMLVideoElement>(
+    "img, audio, video",
+  );
+  for (const [index, sourceElement] of sourceMedia.entries()) {
+    const clonedElement = clonedMedia[index];
+    const currentSrc = sourceElement.currentSrc;
+    if (clonedElement !== undefined && currentSrc !== "") {
+      clonedElement.setAttribute("src", currentSrc);
+    }
+  }
+}
+
 function replaceMediaWithPlaceholders(document: Document): ExtractedMedia[] {
   const media: ExtractedMedia[] = [];
   const byUrl = new Map<string, ExtractedMedia>();
@@ -190,6 +206,7 @@ function replaceMediaWithPlaceholders(document: Document): ExtractedMedia[] {
 export function extractArticle(document: Document, finalUrl: string): ExtractedArticle {
   const source = normalizeSource(finalUrl);
   const renderedClone = document.cloneNode(true) as Document;
+  applyRenderedSourceSnapshot(document, renderedClone);
   materializeRenderedResources(renderedClone, source);
 
   const extracted = new Readability(renderedClone, {

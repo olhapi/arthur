@@ -38,6 +38,32 @@ describe("extractArticle", () => {
     expect(article.markdown).toContain("[Embedded content](https://example.test/embedded/player)");
   });
 
+  it("uses the live responsive source selected before document cloning", () => {
+    const document = new DOMParser().parseFromString(
+      `<!doctype html>
+        <html><head><title>Responsive article</title></head><body>
+          <article class="article-content">
+            <h1>Responsive article</h1>
+            <p>This article proves extraction reads the browser-selected responsive image instead of a fallback attribute.</p>
+            <img id="hero" src="/media/fallback.jpg" srcset="/media/small.jpg 400w, /media/selected.webp 1200w" alt="Hero">
+          </article>
+        </body></html>`,
+      "text/html",
+    );
+    const hero = document.querySelector<HTMLImageElement>("#hero");
+    Object.defineProperty(hero, "currentSrc", {
+      configurable: true,
+      value: "https://cdn.example.test/rendered/selected.webp",
+    });
+
+    const article = extractArticle(document, "https://example.test/articles/responsive");
+
+    expect(article.media).toContainEqual(
+      expect.objectContaining({ url: "https://cdn.example.test/rendered/selected.webp" }),
+    );
+    expect(article.media).not.toContainEqual(expect.objectContaining({ url: "https://example.test/media/fallback.jpg" }));
+  });
+
   it("preserves Markdown structures that Readability retains", () => {
     const article = extractArticle(fixtureDocument(), "https://example.test/articles/media?edition=1");
 
