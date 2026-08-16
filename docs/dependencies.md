@@ -21,3 +21,19 @@ registry `deprecated` field.
 `tsx` is omitted because the accepted design has no direct-TypeScript runtime
 script. `date-fns` is omitted because it has no date-formatting requirement.
 `fflate` is omitted because the accepted design has no ZIP fallback.
+
+## Rust native host
+
+Verified on 2026-08-16 through the repository Rust 1.97.1 adapter. The exact
+pins resolved from crates.io, their primary repositories were checked for the
+recorded activity below, and the RustSec advisory database is rechecked by the
+locked `cargo-audit` gate.
+
+| Crate | Pin | Features | Repository activity | Advisory result |
+| --- | --- | --- | --- | --- |
+| `serde` | `1.0.229` | `derive` | `serde-rs/serde` 2026-07-25 | no RustSec entry |
+| `serde_json` | `1.0.151` | default | `serde-rs/json` 2026-08-08 | no RustSec entry |
+| `rustix` | `1.1.4` | `std`, `fs` only | `bytecodealliance/rustix` 2026-06-15 | no RustSec entry |
+| `url` | `2.5.8` | default | `servo/rust-url` 2026-07-31 | no RustSec entry |
+| `sha2` | `0.11.0` | no defaults | `RustCrypto/hashes` 2026-07-16 | RUSTSEC-2021-0100 patched since 0.9.8 |
+| `base64` | `0.23.1` | `std`, no defaults | `marshallpierce/rust-base64` 2026-08-04 | RUSTSEC-2017-0004 patched since 0.5.2 |

@@ -11,14 +11,19 @@
     "dev:firefox": "wxt -b firefox",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "wxt prepare && tsc --noEmit && tsc -p tsconfig.native.json --noEmit",
-    "build:native": "tsc -p tsconfig.native.json",
+    "typecheck": "wxt prepare && tsc --noEmit",
+    "test:native": "node scripts/rust-toolchain.mjs test --manifest-path native/Cargo.toml --locked",
+    "format:native:check": "node scripts/rust-toolchain.mjs fmt --manifest-path native/Cargo.toml --all -- --check",
+    "lint:native": "node scripts/rust-toolchain.mjs clippy --manifest-path native/Cargo.toml --all-targets --locked -- -D warnings",
+    "audit:native": "test \"$(\"${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit\" --version)\" = \"cargo-audit 0.22.2\" && PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\" node scripts/rust-toolchain.mjs audit --file native/Cargo.lock",
+    "build:native": "node scripts/rust-toolchain.mjs build --manifest-path native/Cargo.toml --release --locked",
     "build:chrome": "wxt build -b chrome",
     "build:edge": "wxt build -b edge",
     "build:firefox": "wxt build -b firefox",
     "build": "pnpm build:native && pnpm build:chrome && pnpm build:edge && pnpm build:firefox",
     "zip": "wxt zip -b chrome && wxt zip -b edge && wxt zip -b firefox",
-    "verify": "pnpm test && pnpm typecheck && pnpm build && pnpm audit --audit-level high"
+    "verify:native": "pnpm test:native && pnpm format:native:check && pnpm lint:native && pnpm build:native && pnpm audit:native",
+    "verify": "pnpm test && pnpm typecheck && pnpm verify:native && pnpm build && pnpm audit --audit-level high"
   },
   "dependencies": {
     "@mozilla/readability": "0.6.0",
@@ -27,7 +32,6 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/node": "26.2.0",
     "@types/turndown": "5.0.6",
     "happy-dom": "20.11.2",
     "typescript": "7.0.2",
