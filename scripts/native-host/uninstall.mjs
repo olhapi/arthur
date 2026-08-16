@@ -7,6 +7,16 @@ function missing(error) {
   return error && typeof error === "object" && error.code === "ENOENT";
 }
 
+async function parentIsAbsent(fs, home, parent) {
+  try {
+    await validateDirectoryChain(fs, home, parent);
+    return false;
+  } catch (error) {
+    if (missing(error)) return true;
+    throw error;
+  }
+}
+
 export async function buildUninstallPlan({ home, platform, targets, fs = nodeFs } = {}) {
   const canonicalHome = await canonicalizeHome(fs, home);
   const expected = nativeHostTargets({ home: canonicalHome, platform });
@@ -27,7 +37,7 @@ export async function applyUninstallPlan(plan, { fs = nodeFs, home, platform } =
     throw new Error("Uninstall plan contains a target outside Arthur's exact allowlist.");
   }
   for (const target of targets) {
-    await validateDirectoryChain(fs, canonicalHome, path.dirname(target));
+    if (await parentIsAbsent(fs, canonicalHome, path.dirname(target))) continue;
     try {
       const stat = await fs.lstat(target);
       if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Refusing to remove unexpected native-host target: ${target}`);
@@ -37,14 +47,14 @@ export async function applyUninstallPlan(plan, { fs = nodeFs, home, platform } =
   }
   for (const target of targets) {
     try {
-      await validateDirectoryChain(fs, canonicalHome, path.dirname(target));
+      if (await parentIsAbsent(fs, canonicalHome, path.dirname(target))) continue;
       await fs.unlink(target);
     } catch (error) { if (!missing(error)) throw error; }
   }
   try {
-    await validateDirectoryChain(fs, canonicalHome, nativeHostDirectory);
+    if (await parentIsAbsent(fs, canonicalHome, nativeHostDirectory)) return;
     if ((await fs.readdir(nativeHostDirectory)).length === 0) {
-      await validateDirectoryChain(fs, canonicalHome, nativeHostDirectory);
+      if (await parentIsAbsent(fs, canonicalHome, nativeHostDirectory)) return;
       await fs.rmdir(nativeHostDirectory);
     }
   } catch (error) {

@@ -68,7 +68,7 @@ export function requestHost(spawn, binary, request) {
       if (failed) return;
       const bytes = Buffer.from(chunk);
       stdoutBytes += bytes.length;
-      if (stdoutBytes > MAX_RESPONSE_BYTES) return fail(new Error("Native host response exceeds 1 MiB."));
+      if (stdoutBytes > MAX_RESPONSE_BYTES + 4) return fail(new Error("Native host response exceeds 1 MiB."));
       try {
         let payload = bytes;
         if (responseLength === undefined) {
@@ -78,6 +78,7 @@ export function requestHost(spawn, binary, request) {
             return;
           }
           responseLength = header.readUInt32LE(0);
+          if (responseLength > MAX_RESPONSE_BYTES) return fail(new Error("Native host response exceeds 1 MiB."));
           payload = header.subarray(4);
         }
         decoder.decode(payload, { stream: true });
@@ -100,9 +101,10 @@ export function requestHost(spawn, binary, request) {
   });
 }
 
-async function assertAbsent(fs, targets) {
+async function assertAbsent(fs, home, targets) {
   for (const target of Object.values(targets)) {
     try {
+      await validateDirectoryChain(fs, home, path.dirname(target));
       await fs.lstat(target);
       throw new Error(`Arthur native-host target was expected absent: ${target}`);
     } catch (error) {
@@ -116,7 +118,7 @@ export async function verifyInstall({ home, platform, destination, expectAbsent 
   const targets = nativeHostTargets({ home: canonicalHome, platform });
   if (expectAbsent) {
     if (destination !== undefined) throw new Error("--expect-absent cannot be combined with a destination test.");
-    await assertAbsent(fs, targets);
+    await assertAbsent(fs, canonicalHome, targets);
     return { installed: false, absent: true };
   }
   await validateDirectoryChain(fs, canonicalHome, path.dirname(targets.binary));
@@ -126,6 +128,7 @@ export async function verifyInstall({ home, platform, destination, expectAbsent 
   await assertRegularNonSymlink(fs, targets.binary, "Installed native-host binary");
   const binaryStat = await fs.lstat(targets.binary);
   if ((binaryStat.mode & 0o777) !== 0o755) throw new Error("Installed native-host binary must have mode 0755.");
+  await validateDirectoryChain(fs, canonicalHome, path.dirname(targets.binary));
   const nativeFiles = await fs.readdir(path.dirname(targets.binary));
   if (nativeFiles.length !== 1 || nativeFiles[0] !== "arthur-native-host") throw new Error("Native-host directory must contain exactly one binary.");
   const hello = await requestHost(spawn, targets.binary, { type: "hello", requestId: "verify-hello", protocolVersion: 1 });

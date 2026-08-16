@@ -136,10 +136,14 @@ async function readRegularSource(fs, source) {
   }
 }
 
-async function removeOwnedStaging(fs, staging) {
+async function removeOwnedStaging(fs, home, staging) {
   try {
+    await validateDirectoryChain(fs, home, path.dirname(staging));
     const stat = await fs.lstat(staging);
-    if (stat.isFile() && !stat.isSymbolicLink()) await fs.unlink(staging);
+    if (stat.isFile() && !stat.isSymbolicLink()) {
+      await validateDirectoryChain(fs, home, path.dirname(staging));
+      await fs.unlink(staging);
+    }
   } catch { /* best-effort cleanup only for the unique owned staging path */ }
 }
 
@@ -161,7 +165,7 @@ async function atomicWrite(fs, home, destination, bytes, mode, label) {
     if (destinationHandle !== undefined) {
       try { await destinationHandle.close(); } catch { /* preserve the original failure */ }
     }
-    await removeOwnedStaging(fs, staging);
+    await removeOwnedStaging(fs, home, staging);
     throw error;
   }
   try {
@@ -169,7 +173,7 @@ async function atomicWrite(fs, home, destination, bytes, mode, label) {
     await assertRegularNonSymlink(fs, destination, label);
     await fs.rename(staging, destination);
   } catch (error) {
-    await removeOwnedStaging(fs, staging);
+    await removeOwnedStaging(fs, home, staging);
     throw error;
   }
 }

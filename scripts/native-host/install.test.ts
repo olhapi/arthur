@@ -1,7 +1,8 @@
+import * as nodeFs from "node:fs/promises";
 import { mkdtemp, mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { CHROMIUM_EXTENSION_ID } from "./identity.mjs";
 import { applyInstallPlan, buildInstallPlan } from "./install.mjs";
@@ -97,5 +98,58 @@ describe("native-host installation plan", () => {
     await applyUninstallPlan(uninstall, { home: options.home, platform: "darwin" });
     for (const target of uninstall.targets) await expect(readFile(target)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(buildUninstallPlan({ home: options.home, platform: "darwin", targets: ["/tmp/escape"] })).rejects.toThrow(/allowlist/i);
+  });
+
+  it("treats missing target parents as absent during bounded uninstall", async () => {
+    const options = await fixture();
+    const uninstall = await buildUninstallPlan({ home: options.home, platform: "darwin" });
+    await expect(applyUninstallPlan(uninstall, { home: options.home, platform: "darwin" })).resolves.toBeUndefined();
+  });
+
+  it("rejects forged uninstall plans and manifest/ancestor symlinks", async () => {
+    const options = await fixture();
+    const plan = await buildInstallPlan({ ...options, platform: "darwin" });
+    await applyInstallPlan(plan, { home: options.home, platform: "darwin" });
+    const uninstall = await buildUninstallPlan({ home: options.home, platform: "darwin" });
+    uninstall.nativeHostDirectory = path.join(options.home, "escape");
+    await expect(applyUninstallPlan(uninstall, { home: options.home, platform: "darwin" })).rejects.toThrow(/allowlist/i);
+
+    const leaf = await fixture();
+    const chromeManifest = path.join(leaf.home, "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.olhapi.arthur.json");
+    await mkdir(path.dirname(chromeManifest), { recursive: true });
+    await symlink("/tmp/not-arthur", chromeManifest);
+    await expect(buildInstallPlan({ ...leaf, platform: "darwin" })).rejects.toThrow(/symlink/i);
+
+    const ancestor = await fixture();
+    await symlink("/tmp", path.join(ancestor.home, "Library"));
+    const ancestorPlan = await buildInstallPlan({ ...ancestor, platform: "darwin" });
+    await expect(applyInstallPlan(ancestorPlan, { home: ancestor.home, platform: "darwin" })).rejects.toThrow(/directory/i);
+  });
+
+  it("does not rename when exclusive staging write, fsync, or close fails", async () => {
+    for (const failure of ["open", "writeFile", "sync", "close"] as const) {
+      const options = await fixture();
+      const plan = await buildInstallPlan({ ...options, platform: "darwin" });
+      let openCount = 0;
+      const rename = vi.fn(nodeFs.rename);
+      const fs = {
+        ...nodeFs,
+        rename,
+        open: async (...args: Parameters<typeof nodeFs.open>) => {
+          openCount += 1;
+          if (failure === "open" && openCount === 2) throw new Error("exclusive staging open failed");
+          const handle = await nodeFs.open(...args);
+          if (openCount !== 2 || failure === "open") return handle;
+          return new Proxy(handle, { get(target, property) {
+            if (property === failure) return async () => { throw new Error(`${failure} failed`); };
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          } });
+        },
+      };
+      await expect(applyInstallPlan(plan, { home: options.home, platform: "darwin", fs })).rejects.toThrow(failure === "open" ? /open failed/i : new RegExp(`${failure} failed`, "i"));
+      expect(rename).not.toHaveBeenCalled();
+      await expect(readFile(plan.payloads[0]!.destination)).rejects.toMatchObject({ code: "ENOENT" });
+    }
   });
 });

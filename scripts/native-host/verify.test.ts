@@ -1,12 +1,12 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, realpath, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 
 import { applyInstallPlan, buildInstallPlan } from "./install.mjs";
-import { verifyInstall } from "./verify.mjs";
+import { requestHost, verifyInstall } from "./verify.mjs";
 
 function frame(value: unknown) {
   const json = Buffer.from(JSON.stringify(value));
@@ -65,7 +65,20 @@ describe("native-host verification", () => {
     const { home } = await installedFixture();
     await expect(verifyInstall({ home, platform: "darwin", spawn: spawningBytes(Buffer.from([1, 0, 0, 0, 0xff])) })).rejects.toThrow(/UTF-8/i);
     await expect(verifyInstall({ home, platform: "darwin", spawn: spawningBytes(Buffer.concat([frame({ type: "hello_result" }), Buffer.from("noise")])) })).rejects.toThrow(/malformed|noisy|hello/i);
-    await expect(verifyInstall({ home, platform: "darwin", spawn: spawningBytes(Buffer.alloc(1024 * 1024 + 1)) })).rejects.toThrow(/1 MiB/i);
+    const maxHeader = Buffer.alloc(4);
+    maxHeader.writeUInt32LE(1024 * 1024);
+    await expect(verifyInstall({ home, platform: "darwin", spawn: spawningBytes(Buffer.concat([maxHeader, Buffer.alloc(1024 * 1024 + 1)])) })).rejects.toThrow(/1 MiB/i);
+  });
+
+  it("kills a host immediately when its header declares more than 1 MiB", async () => {
+    let child: any;
+    const spawn = vi.fn(() => {
+      child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn() });
+      queueMicrotask(() => { child.stdout.end(Buffer.from([1, 0, 16, 0])); child.stderr.end(); child.emit("close", 0); });
+      return child;
+    });
+    await expect(requestHost(spawn, "/tmp/host", { type: "hello" })).rejects.toThrow(/1 MiB/i);
+    expect(child!.kill).toHaveBeenCalledTimes(1);
   });
 
   it("canonicalizes a legitimate destination symlink and does not spawn for complete absence", async () => {
@@ -98,5 +111,28 @@ describe("native-host verification", () => {
       .mockImplementationOnce(spawning({ type: "hello_result", requestId: "verify-hello", protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" }))
       .mockImplementationOnce(spawning({ type: "test_destination_result", requestId: "verify-destination", destination: canonicalDestination, writable: true }));
     await expect(verifyInstall({ home, platform: "darwin", destination, spawn })).resolves.toMatchObject({ destination: canonicalDestination });
+  });
+
+  it("rejects bad manifest JSON, IDs, paths, modes, nonregular binaries, and extra payloads", async () => {
+    const badJson = await installedFixture();
+    await writeFile(badJson.plan.manifests[0]!.destination, "{");
+    await expect(verifyInstall({ home: badJson.home, platform: "darwin" })).rejects.toThrow(/JSON/i);
+
+    const badId = await installedFixture();
+    await writeFile(badId.plan.manifests[1]!.destination, JSON.stringify({ ...badId.plan.manifests[1]!.contents, allowed_origins: ["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"] }));
+    await expect(verifyInstall({ home: badId.home, platform: "darwin" })).rejects.toThrow(/manifest/i);
+
+    const badMode = await installedFixture();
+    await chmod(badMode.plan.payloads[0]!.destination, 0o700);
+    await expect(verifyInstall({ home: badMode.home, platform: "darwin" })).rejects.toThrow(/0755/i);
+
+    const nonregular = await installedFixture();
+    await unlink(nonregular.plan.payloads[0]!.destination);
+    await mkdir(nonregular.plan.payloads[0]!.destination);
+    await expect(verifyInstall({ home: nonregular.home, platform: "darwin" })).rejects.toThrow(/regular/i);
+
+    const extra = await installedFixture();
+    await writeFile(path.join(path.dirname(extra.plan.payloads[0]!.destination), "extra"), "extra");
+    await expect(verifyInstall({ home: extra.home, platform: "darwin" })).rejects.toThrow(/exactly one/i);
   });
 });
