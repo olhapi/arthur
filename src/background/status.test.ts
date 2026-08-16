@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { StatusController, type StatusBrowserAdapter } from "./status.js";
 
@@ -53,14 +53,30 @@ describe("StatusController", () => {
     expect(browser.calls).toEqual([
       "badge:17:!",
       "local",
-      "popup:17:status.html",
+      "popup:17:status.html?tabId=17",
       "badge:17:!",
       "local",
-      "popup:17:status.html",
+      "popup:17:status.html?tabId=17",
     ]);
     expect(browser.details).toEqual([
       { tabId: 17, kind: "warning", details: [{ code: "media_fallback", message: "The original link was retained." }] },
       { tabId: 17, kind: "error", details: [{ code: "commit_failed", message: "The article could not be committed." }] },
+    ]);
+  });
+
+  it("keeps saving and post-commit success UI when status cleanup rejects", async () => {
+    const browser = new FakeStatusBrowser();
+    browser.clearLocal = vi.fn().mockRejectedValue(new Error("storage unavailable"));
+    const status = new StatusController(browser);
+
+    await expect(status.saving(17)).resolves.toBeUndefined();
+    await expect(status.success(17)).resolves.toBeUndefined();
+
+    expect(browser.calls).toEqual([
+      "badge:17:…",
+      "popup:17:",
+      "badge:17:✓",
+      "popup:17:",
     ]);
   });
 });

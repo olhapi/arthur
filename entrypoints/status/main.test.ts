@@ -2,10 +2,16 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { loadStatusForActiveTab, mountStatusPage } from "./main.js";
+import { loadStatusForActiveTab, mountStatusPage, tabIdHintFromUrl } from "./main.js";
 import { statusStorageKey } from "../../src/background/status.js";
 
 describe("mountStatusPage", () => {
+  it("captures only an exact non-negative popup tab ID", () => {
+    expect(tabIdHintFromUrl("moz-extension://arthur/status.html?tabId=17")).toBe(17);
+    expect(tabIdHintFromUrl("moz-extension://arthur/status.html?tabId=17&extra=true")).toBeUndefined();
+    expect(tabIdHintFromUrl("moz-extension://arthur/status.html?tabId=-1")).toBeUndefined();
+  });
+
   it("renders stored warning details as text rather than HTML", async () => {
     document.body.innerHTML = '<main><div id="status-details" aria-live="polite"></div><button id="retry-save">Retry save</button></main>';
     const page = mountStatusPage(document, {
@@ -119,5 +125,49 @@ describe("mountStatusPage", () => {
     expect(browser.storage.local.get).toHaveBeenCalledWith(statusStorageKey(41));
     expect(document.querySelector("#status-details")?.textContent).toBe("tab_a: Status for A.");
     expect(document.body.textContent).not.toContain("Status for B.");
+  });
+
+  it("does not render a stored record tagged for another tab", async () => {
+    document.body.innerHTML = '<main><div id="status-details" aria-live="polite"></div><button id="retry-save">Retry save</button></main>';
+    const page = mountStatusPage(document, {
+      loadStatus: vi.fn().mockResolvedValue({
+        tabId: 17,
+        status: { tabId: 18, kind: "error", details: [{ code: "other_tab", message: "Do not show this." }] },
+      }),
+      retrySave: vi.fn(),
+    });
+
+    await page.ready;
+
+    expect(document.querySelector("#status-details")?.textContent).toBe("No recent save issues.");
+  });
+
+  it.each([
+    ["active tab lookup", {
+      tabs: { query: vi.fn().mockRejectedValue(new Error("tabs unavailable")) },
+      storage: { local: { get: vi.fn() } },
+    }],
+    ["status storage lookup", {
+      tabs: { query: vi.fn().mockResolvedValue([{ id: 17 }]) },
+      storage: { local: { get: vi.fn().mockRejectedValue(new Error("storage unavailable")) } },
+    }],
+  ])("renders safe recovery UI when %s rejects", async (_name, browser) => {
+    document.body.innerHTML = '<main><div id="status-details" aria-live="polite"></div><button id="retry-save">Retry save</button></main>';
+    const clearPopup = vi.fn().mockResolvedValue(undefined);
+    const page = mountStatusPage(document, {
+      loadStatus: () => loadStatusForActiveTab(browser),
+      retrySave: vi.fn(),
+      tabIdHint: 17,
+      clearPopup,
+    });
+
+    await expect(page.ready).resolves.toBeUndefined();
+
+    expect(document.querySelector("#status-details")?.textContent).toBe(
+      "Status unavailable: Arthur could not load this tab's status.",
+    );
+    expect(document.querySelector<HTMLElement>("#status-details")?.dataset.kind).toBe("error");
+    expect(document.querySelector<HTMLButtonElement>("#retry-save")?.disabled).toBe(true);
+    expect(clearPopup).toHaveBeenCalledWith(17);
   });
 });

@@ -27,27 +27,31 @@ export interface SaveStatus {
 export class StatusController implements SaveStatus {
   constructor(private readonly browser: StatusBrowserAdapter) {}
 
+  private async clearLocalBestEffort(tabId: number): Promise<void> {
+    await Promise.resolve(this.browser.clearLocal(tabId)).catch(() => undefined);
+  }
+
   async saving(tabId: number): Promise<void> {
     await this.browser.setBadgeText({ tabId, text: "…" });
     await this.browser.setPopup({ tabId, popup: "" });
-    await this.browser.clearLocal(tabId);
+    await this.clearLocalBestEffort(tabId);
   }
 
   async success(tabId: number): Promise<void> {
     await this.browser.setBadgeText({ tabId, text: "✓" });
     await this.browser.setPopup({ tabId, popup: "" });
-    await this.browser.clearLocal(tabId);
+    await this.clearLocalBestEffort(tabId);
   }
 
   async warning(tabId: number, details: readonly StatusDetail[]): Promise<void> {
     await this.browser.setBadgeText({ tabId, text: "!" });
     await this.browser.setLocal({ tabId, kind: "warning", details });
-    await this.browser.setPopup({ tabId, popup: "status.html" });
+    await this.browser.setPopup({ tabId, popup: `status.html?tabId=${tabId}` });
   }
 
   async error(tabId: number, detail: StatusDetail): Promise<void> {
     await this.browser.setBadgeText({ tabId, text: "!" });
     await this.browser.setLocal({ tabId, kind: "error", details: [detail] });
-    await this.browser.setPopup({ tabId, popup: "status.html" });
+    await this.browser.setPopup({ tabId, popup: `status.html?tabId=${tabId}` });
   }
 }

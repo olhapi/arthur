@@ -12,6 +12,8 @@ export interface StoredStatus {
 export interface StatusDependencies {
   loadStatus(): Promise<{ tabId: number; status: unknown } | undefined>;
   retrySave(tabId: number): Promise<RetrySaveResult>;
+  tabIdHint?: number | undefined;
+  clearPopup?(tabId: number | undefined): Promise<void>;
 }
 
 export interface StatusPage {
@@ -21,6 +23,28 @@ export interface StatusPage {
 export interface StatusPageBrowser {
   tabs: { query(query: { active: boolean; currentWindow: boolean }): Promise<readonly { id?: number }[]> };
   storage: { local: { get(key: string): Promise<Record<string, unknown>> } };
+}
+
+interface StatusActionFacade {
+  setPopup(details: { tabId?: number; popup: string }): Promise<void> | void;
+}
+
+interface StatusPopupBrowser extends StatusPageBrowser {
+  action?: StatusActionFacade;
+  browserAction?: StatusActionFacade;
+}
+
+export function tabIdHintFromUrl(value: string): number | undefined {
+  try {
+    const url = new URL(value);
+    if (url.searchParams.size !== 1) return undefined;
+    const raw = url.searchParams.get("tabId");
+    if (raw === null || !/^\d+$/.test(raw)) return undefined;
+    const tabId = Number(raw);
+    return Number.isSafeInteger(tabId) ? tabId : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function loadStatusForActiveTab(
@@ -79,28 +103,44 @@ export function mountStatusPage(document: Document, dependencies: StatusDependen
     }
   });
 
-  const ready = dependencies.loadStatus().then((loaded) => {
-    retryTabId = loaded?.tabId;
-    const status = statusFrom(loaded?.status);
-    details.replaceChildren();
-    if (status === undefined || status.details.length === 0) {
-      details.textContent = "No recent save issues.";
-      return;
-    }
-    details.dataset.kind = status.kind;
-    const list = document.createElement("ul");
-    for (const detail of status.details) {
-      const item = document.createElement("li");
-      item.textContent = `${detail.code}: ${detail.message}`;
-      list.append(item);
-    }
-    details.append(list);
-  });
+  const ready = dependencies.loadStatus().then(
+    (loaded) => {
+      retryTabId = loaded?.tabId;
+      const candidate = statusFrom(loaded?.status);
+      const status = candidate?.tabId === loaded?.tabId ? candidate : undefined;
+      details.replaceChildren();
+      if (status === undefined || status.details.length === 0) {
+        details.textContent = "No recent save issues.";
+        return;
+      }
+      details.dataset.kind = status.kind;
+      const list = document.createElement("ul");
+      for (const detail of status.details) {
+        const item = document.createElement("li");
+        item.textContent = `${detail.code}: ${detail.message}`;
+        list.append(item);
+      }
+      details.append(list);
+    },
+    async () => {
+      details.dataset.kind = "error";
+      details.textContent = "Status unavailable: Arthur could not load this tab's status.";
+      retry.disabled = true;
+      await dependencies.clearPopup?.(dependencies.tabIdHint).catch(() => undefined);
+    },
+  );
   return { ready };
 }
 
 if (document.querySelector("#status-details") !== null) {
+  const popupBrowser = browser as unknown as StatusPopupBrowser;
   void mountStatusPage(document, {
+    tabIdHint: tabIdHintFromUrl(location.href),
+    async clearPopup(tabId: number | undefined): Promise<void> {
+      const action = popupBrowser.action ?? popupBrowser.browserAction;
+      if (action === undefined) return;
+      await action.setPopup(tabId === undefined ? { popup: "" } : { tabId, popup: "" });
+    },
     async loadStatus(): Promise<{ tabId: number; status: unknown } | undefined> {
       return loadStatusForActiveTab(browser as unknown as StatusPageBrowser);
     },

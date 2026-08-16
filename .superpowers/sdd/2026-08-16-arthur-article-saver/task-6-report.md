@@ -121,3 +121,39 @@ facades; production uses WXT's unified `browser` API.
 - GREEN `rtk pnpm test -- entrypoints` passes 15 files and 84 tests.
 - Standard typecheck and Chrome, Edge, and Firefox builds pass.
 - Generated manifest assertions and `rtk git diff --check` pass.
+
+## Review fix round 3
+
+### RED → GREEN evidence
+
+- Firefox MV2 action wiring: RED failed at background registration and status
+  adapter calls when the injected runtime exposed only `browserAction`. GREEN
+  resolves `action ?? browserAction` at every production action boundary and
+  exercises a real browser-action click through the MV2-only facade.
+- Best-effort status cleanup: RED showed a rejected per-tab storage removal
+  aborting both the pre-save `saving` transition and post-commit `success`
+  transition. GREEN preserves badge/popup updates while swallowing only status
+  record cleanup failures; tab-close and legacy cleanup remain best-effort.
+- Popup recovery: RED propagated active-tab and storage lookup rejections from
+  `ready`. GREEN renders a typed safe failure, terminally disables retry, and
+  best-effort clears the exact tab popup using the tab ID embedded in the popup
+  URL, preventing repeated stale-popup interception.
+- Retry tab validation: RED left the stale popup installed for existing tabs
+  with missing or non-HTTP(S) URLs. GREEN clears the explicit requested tab's
+  popup before returning typed `tab_unavailable`, even if popup clearing fails.
+- Status identity: RED rendered a valid stored record tagged for another tab.
+  GREEN requires the record's `tabId` to match the captured popup tab before
+  rendering it. The retry sender is likewise bound to the exact one-parameter
+  status URL for that tab.
+
+### Verification
+
+- GREEN `rtk pnpm test -- entrypoints` passes 15 files and 92 tests.
+- `rtk pnpm typecheck` passes with all production entrypoints included.
+- Chrome MV3, Edge MV3, and Firefox MV2 production builds pass.
+- Generated manifests retain `storage`, `nativeMessaging`, HTTP(S) access, no
+  default popup, and Firefox ID `arthur@olhapi.com`.
+- The generated Firefox MV2 background and status bundles contain the
+  `action ?? browserAction` fallback, in addition to the browserAction-only
+  runtime regression tests.
+- `rtk git diff --check` passes.

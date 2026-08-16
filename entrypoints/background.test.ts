@@ -4,7 +4,7 @@ import { createBackgroundController, createStatusBrowserAdapter, registerStatusC
 import { registerExtractionListener } from "./content.js";
 import { StatusController, statusStorageKey } from "../src/background/status.js";
 
-const trustedSender = { id: "arthur-extension", url: "moz-extension://arthur-extension/status.html" };
+const trustedSender = { id: "arthur-extension", url: "moz-extension://arthur-extension/status.html?tabId=31" };
 
 function retryHarness({
   tab = { id: 31, url: "https://example.test/retry" },
@@ -78,6 +78,27 @@ describe("createBackgroundController", () => {
     expect(save).toHaveBeenCalledWith(18, "https://example.test/article");
   });
 
+  it("registers and saves through Firefox MV2's browserAction-only API", async () => {
+    let onClick: ((tab: { id?: number; url?: string }) => void) | undefined;
+    const browser = {
+      browserAction: {
+        onClicked: { addListener(listener: (tab: { id?: number; url?: string }) => void) { onClick = listener; } },
+        setPopup: vi.fn().mockResolvedValue(undefined),
+      },
+      tabs: {
+        query: vi.fn().mockResolvedValue([{ id: 19, url: "https://example.test/firefox" }]),
+      },
+      runtime: { onMessage: { addListener: vi.fn() } },
+    };
+    const save = vi.fn().mockResolvedValue(undefined);
+
+    createBackgroundController(browser, { save });
+    onClick?.({ id: 19, url: "https://example.test/firefox" });
+    await vi.waitFor(() => expect(save).toHaveBeenCalledWith(19, "https://example.test/firefox"));
+
+    expect(browser.browserAction.setPopup).toHaveBeenCalledWith({ tabId: 19, popup: "" });
+  });
+
   it("prevents concurrent saves across tabs that share one native client", async () => {
     let onClick: ((tab: { id?: number; url?: string }) => void) | undefined;
     const browser = {
@@ -135,6 +156,14 @@ describe("createBackgroundController", () => {
       id: "other-extension",
       url: "moz-extension://arthur-extension/status.html",
     }, sendResponse)).toBeUndefined();
+    expect(harness.onMessage?.({ type: "retry_save", tabId: 31 }, {
+      id: "arthur-extension",
+      url: "moz-extension://arthur-extension/status.html?tabId=32",
+    }, sendResponse)).toBeUndefined();
+    expect(harness.onMessage?.({ type: "retry_save", tabId: 31 }, {
+      id: "arthur-extension",
+      url: "moz-extension://arthur-extension/status.html?tabId=31&extra=true",
+    }, sendResponse)).toBeUndefined();
     expect(harness.browser.tabs.get).not.toHaveBeenCalled();
     expect(sendResponse).not.toHaveBeenCalled();
   });
@@ -142,6 +171,7 @@ describe("createBackgroundController", () => {
   it.each([
     ["closed tab", { tab: () => Promise.reject(new Error("closed")) }, "tab_unavailable"],
     ["tab without a URL", { tab: () => Promise.resolve({ id: 31 }) }, "tab_unavailable"],
+    ["tab with an invalid URL", { tab: () => Promise.resolve({ id: 31, url: "about:config" }) }, "tab_unavailable"],
     ["popup clearing failure", { setPopup: vi.fn().mockRejectedValue(new Error("popup")) }, "save_failed"],
     ["coordinator rejection", { save: vi.fn().mockRejectedValue(new Error("save")) }, "save_failed"],
   ])("responds with a typed failure for %s", async (_name, setup, expectedCode) => {
@@ -153,6 +183,9 @@ describe("createBackgroundController", () => {
     if (setup.tab !== undefined) harness.browser.tabs.get.mockImplementation(setup.tab);
 
     await expect(harness.dispatch()).resolves.toMatchObject({ ok: false, code: expectedCode });
+    if (_name === "tab without a URL" || _name === "tab with an invalid URL") {
+      expect(harness.browser.action.setPopup).toHaveBeenCalledWith({ tabId: 31, popup: "" });
+    }
   });
 
   it("responds busy instead of claiming a skipped retry succeeded", async () => {
@@ -169,6 +202,19 @@ describe("createBackgroundController", () => {
 });
 
 describe("per-tab status storage", () => {
+  it("uses Firefox MV2's browserAction API for status UI", async () => {
+    const browserAction = { setBadgeText: vi.fn(), setPopup: vi.fn() };
+    const adapter = createStatusBrowserAdapter({
+      browserAction,
+      storage: { local: { set: vi.fn(), remove: vi.fn() } },
+    });
+
+    await adapter.setBadgeText({ tabId: 41, text: "!" });
+    await adapter.setPopup({ tabId: 41, popup: "status.html?tabId=41" });
+
+    expect(browserAction.setBadgeText).toHaveBeenCalledWith({ tabId: 41, text: "!" });
+    expect(browserAction.setPopup).toHaveBeenCalledWith({ tabId: 41, popup: "status.html?tabId=41" });
+  });
   it("writes independent keys for A and B instead of replacing one global record", async () => {
     const storage = { set: vi.fn().mockResolvedValue(undefined), remove: vi.fn().mockResolvedValue(undefined) };
     const adapter = createStatusBrowserAdapter({
