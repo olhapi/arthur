@@ -10,6 +10,6 @@
     "noEmit": true,
     "resolveJsonModule": true
   },
-  "include": ["src/shared/**/*.ts", "src/article/**/*.ts", "wxt.config.ts", "vitest.config.ts"],
-  "exclude": ["src/article/**/*.test.ts"]
+  "include": ["src/shared/**/*.ts", "src/article/**/*.ts", "src/background/**/*.ts", "wxt.config.ts", "vitest.config.ts"],
+  "exclude": ["src/article/**/*.test.ts", "src/background/**/*.test.ts"]
 }
