@@ -2,7 +2,6 @@ mod frontmatter;
 mod fs;
 mod names;
 
-use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, mkdirat, openat};
 use std::{
     os::fd::OwnedFd,
     path::{Path, PathBuf},
@@ -41,29 +40,11 @@ impl Vault {
         let canonical_destination = destination
             .canonicalize()
             .map_err(|_| VaultError::InvalidDestination)?;
-        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
-        let destination = openat(CWD, &canonical_destination, flags, Mode::empty())
-            .map_err(|_| VaultError::InvalidDestination)?;
-        if !FileType::from_raw_mode(fstat(&destination).map_err(|_| VaultError::Io)?.st_mode)
-            .is_dir()
-        {
+        if !canonical_destination.is_dir() {
             return Err(VaultError::NotDirectory);
         }
-        if let Err(error) = mkdirat(
-            &destination,
-            "attachments",
-            Mode::RUSR | Mode::WUSR | Mode::XUSR,
-        ) && error.raw_os_error() != 17
-        {
-            return Err(VaultError::NotWritable);
-        }
-        let attachments = openat(&destination, "attachments", flags, Mode::empty())
-            .map_err(|_| VaultError::UnsafeChild)?;
-        if !FileType::from_raw_mode(fstat(&attachments).map_err(|_| VaultError::Io)?.st_mode)
-            .is_dir()
-        {
-            return Err(VaultError::UnsafeChild);
-        }
+        let destination = fs::open_destination(&canonical_destination)?;
+        let attachments = fs::open_or_create_child_directory(&destination, "attachments")?;
         Ok(Self {
             destination,
             attachments,

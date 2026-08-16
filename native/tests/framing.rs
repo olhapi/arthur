@@ -20,27 +20,43 @@ fn decodes_fragmented_and_coalesced_frames() {
         2
     );
 }
+
+#[test]
+fn decodes_a_split_body_and_allows_an_empty_stream_to_finish() {
+    let bytes = frame(br#"{"split":true}"#);
+    let mut decoder = FrameDecoder::new();
+    assert!(decoder.push(&bytes[..7]).unwrap().is_empty());
+    assert_eq!(decoder.push(&bytes[7..]).unwrap().len(), 1);
+    assert_eq!(decoder.finish(), Ok(()));
+
+    assert_eq!(FrameDecoder::new().finish(), Ok(()));
+}
 #[test]
 fn finish_rejects_truncated_header_and_body() {
     let mut header = FrameDecoder::new();
     header.push(&[1, 0]).unwrap();
     assert_eq!(header.finish(), Err(FrameError::TruncatedFrame));
     assert_eq!(header.push(&frame(b"{}")), Err(FrameError::Poisoned));
+    assert_eq!(header.finish(), Err(FrameError::Poisoned));
     let mut body = FrameDecoder::new();
     body.push(&[4, 0, 0, 0, b'{']).unwrap();
     assert_eq!(body.finish(), Err(FrameError::TruncatedFrame));
+    assert_eq!(body.push(&frame(b"{}")), Err(FrameError::Poisoned));
     assert_eq!(body.finish(), Err(FrameError::Poisoned));
 }
 #[test]
 fn every_bad_frame_permanently_poisons_the_decoder() {
-    for bytes in [
-        vec![0, 0, 0, 0],
-        (MAX_NATIVE_MESSAGE_BYTES as u32 + 1).to_le_bytes().to_vec(),
-        frame(&[0xc3, 0x28]),
-        frame(b"no"),
+    for (bytes, expected) in [
+        (vec![0, 0, 0, 0], FrameError::ZeroLength),
+        (
+            (MAX_NATIVE_MESSAGE_BYTES as u32 + 1).to_le_bytes().to_vec(),
+            FrameError::Oversized(MAX_NATIVE_MESSAGE_BYTES as u32 + 1),
+        ),
+        (frame(&[0xc3, 0x28]), FrameError::InvalidUtf8),
+        (frame(b"no"), FrameError::InvalidJson),
     ] {
         let mut decoder = FrameDecoder::new();
-        assert!(decoder.push(&bytes).is_err());
+        assert_eq!(decoder.push(&bytes), Err(expected));
         assert_eq!(decoder.push(&frame(b"{}")), Err(FrameError::Poisoned));
         assert_eq!(decoder.finish(), Err(FrameError::Poisoned));
     }

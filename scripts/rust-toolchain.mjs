@@ -26,7 +26,7 @@ function command(deps, executable, arguments_) {
 
 function assertVersion(deps, binary, name) {
   const version = command(deps, binary, ["--version"]);
-  if (!new RegExp(`^${name} ${TOOLCHAIN}(?:\\s|$)`).test(version)) {
+  if (version.split(/\s+/, 2).join(" ") !== `${name} ${TOOLCHAIN}`) {
     throw new Error(`Expected ${name} ${TOOLCHAIN}, received ${version}`);
   }
 }

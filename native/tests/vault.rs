@@ -34,3 +34,12 @@ fn opens_a_root_symlink_and_rejects_symlinked_attachments() {
     fs::remove_file(link).unwrap();
     fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn maps_a_regular_destination_file_to_not_directory() {
+    let path = temp().join("not-a-directory");
+    fs::write(&path, "x").unwrap();
+    assert_eq!(Vault::open(&path).err(), Some(VaultError::NotDirectory));
+    fs::remove_file(&path).unwrap();
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}

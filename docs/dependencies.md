@@ -15,7 +15,6 @@ registry `deprecated` field.
 | `typescript` | `7.0.2` | https://github.com/microsoft/TypeScript | 2026-08-14T19:07:48Z | no published repository advisories | static type checking | keep |
 | `vitest` | `4.1.10` | https://github.com/vitest-dev/vitest | 2026-08-14T15:45:58Z | direct Vitest GHSA-5xrq-8626-4rwp affects `>= 4.0.0, < 4.1.0`; pin is outside; browser-only advisory GHSA-p63j-vcc4-9vmv is patched in `@vitest/browser@4.1.10` | contract tests | keep |
 | `happy-dom` | `20.11.2` | https://github.com/capricorn86/happy-dom | 2026-08-12T21:57:59Z | newest GHSA-w4gp-fjgq-3q4g affects `<= 20.8.8`; pin is outside every listed range | Vitest DOM environment | keep |
-| `@types/node` | `26.2.0` | https://github.com/DefinitelyTyped/DefinitelyTyped | 2026-08-15T15:02:18Z | no published repository advisories | Node typings | keep |
 | `@types/turndown` | `5.0.6` | https://github.com/DefinitelyTyped/DefinitelyTyped | 2026-08-15T15:02:18Z | no published repository advisories | Turndown typings | keep |
 
 `tsx` is omitted because the accepted design has no direct-TypeScript runtime

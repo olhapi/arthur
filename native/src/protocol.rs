@@ -1,4 +1,7 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _, alphabet,
+    engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig},
+};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -63,6 +66,7 @@ pub enum ClientMessage {
     AbortSave {
         request_id: String,
         session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
 }
@@ -101,48 +105,103 @@ pub enum HostMessage {
     },
     Ack {
         request_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         media_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         sequence: Option<u64>,
     },
     Warning {
+        #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         code: String,
         message: String,
     },
     Error {
+        #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         code: String,
         message: String,
     },
 }
 
-fn bounded(value: &str, max: usize) -> bool {
-    !value.trim().is_empty() && value.len() <= max
+fn is_js_whitespace(value: char) -> bool {
+    matches!(
+        value,
+        '\u{0009}'..='\u{000d}'
+            | '\u{0020}'
+            | '\u{00a0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202f}'
+            | '\u{205f}'
+            | '\u{3000}'
+            | '\u{feff}'
+    )
+}
+fn trim_js(value: &str) -> String {
+    value.trim_matches(is_js_whitespace).to_owned()
+}
+fn js_length(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+fn bounded(value: &mut String, max: usize) -> bool {
+    *value = trim_js(value);
+    !value.is_empty() && js_length(value) <= max
+}
+fn optional_bounded(value: &mut Option<String>, max: usize) -> bool {
+    value.as_mut().is_none_or(|value| bounded(value, max))
 }
 fn uuid(value: &str) -> bool {
-    value.len() == 36
-        && [8, 13, 18, 23]
+    let value = value.as_bytes();
+    if value.len() != 36
+        || !value
             .iter()
-            .all(|&i| value.as_bytes().get(i) == Some(&b'-'))
+            .copied()
+            .enumerate()
+            .all(|(index, byte)| match index {
+                8 | 13 | 18 | 23 => byte == b'-',
+                _ => byte.is_ascii_hexdigit(),
+            })
+    {
+        return false;
+    }
+    let lower = String::from_utf8_lossy(value).to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "00000000-0000-0000-0000-000000000000" | "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    ) {
+        return true;
+    }
+    matches!(value[14].to_ascii_lowercase(), b'1'..=b'8')
+        && matches!(value[19].to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b')
 }
-fn absolute(value: &str) -> bool {
-    std::path::Path::new(value).is_absolute() && value.len() <= 2048
+fn absolute(value: &mut String) -> bool {
+    *value = trim_js(value);
+    value.starts_with('/') && !value.contains('\0') && js_length(value) <= 4096
 }
 pub fn normalize_source(value: &str) -> Result<String, ProtocolError> {
-    let mut url = Url::parse(value).map_err(|_| ProtocolError::Invalid)?;
-    if !matches!(url.scheme(), "http" | "https") || value.len() > 2048 {
+    let value = trim_js(value);
+    let mut url = Url::parse(&value).map_err(|_| ProtocolError::Invalid)?;
+    if !matches!(url.scheme(), "http" | "https") || js_length(&value) > 2048 {
         return Err(ProtocolError::Invalid);
     }
     url.set_fragment(None);
     Ok(url.into())
 }
-fn mime(value: &str) -> bool {
-    value.len() <= 255
+fn mime(value: &mut String) -> bool {
+    *value = trim_js(value);
+    js_length(value) <= 255
+        && value.matches('/').count() == 1
         && value.split_once('/').is_some_and(|(a, b)| {
-            !a.is_empty() && !b.is_empty() && !value.chars().any(char::is_whitespace)
+            !a.is_empty() && !b.is_empty() && !value.chars().any(is_js_whitespace)
         })
 }
 fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
@@ -175,7 +234,7 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
                 || !uuid(session_id)
                 || !absolute(destination)
                 || !bounded(title, 512)
-                || markdown.len() > 20 * 1024 * 1024
+                || js_length(markdown) > 20 * 1024 * 1024
             {
                 return Err(ProtocolError::Invalid);
             }
@@ -213,10 +272,19 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
             if !uuid(session_id) || !bounded(media_id, 128) {
                 return Err(ProtocolError::Invalid);
             }
-            let bytes = STANDARD
-                .decode(data.as_str())
-                .map_err(|_| ProtocolError::Invalid)?;
-            if bytes.len() > CHUNK_BYTES || STANDARD.encode(bytes) != *data {
+            if data.is_empty() {
+                return Err(ProtocolError::Invalid);
+            }
+            if data.len() > (CHUNK_BYTES.div_ceil(3) * 4) {
+                return Err(ProtocolError::Invalid);
+            }
+            let bytes = GeneralPurpose::new(
+                &alphabet::STANDARD,
+                GeneralPurposeConfig::new().with_decode_allow_trailing_bits(true),
+            )
+            .decode(data.as_str())
+            .map_err(|_| ProtocolError::Invalid)?;
+            if bytes.len() > CHUNK_BYTES {
                 return Err(ProtocolError::Invalid);
             }
         }
@@ -243,51 +311,50 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
             session_id,
             reason,
         } => {
-            if !bounded(request_id, 128)
-                || !uuid(session_id)
-                || reason.as_deref().is_some_and(|v| !bounded(v, 4096))
-            {
+            if !bounded(request_id, 128) || !uuid(session_id) || !optional_bounded(reason, 4096) {
                 return Err(ProtocolError::Invalid);
             }
         }
     };
     Ok(())
 }
-fn validate_host(message: &HostMessage) -> Result<(), ProtocolError> {
+fn validate_host(message: &mut HostMessage) -> Result<(), ProtocolError> {
     match message {
         HostMessage::HelloResult {
             request_id,
             protocol_version,
             host_name,
             host_version,
-        } if bounded(request_id, 128)
+        } => (bounded(request_id, 128)
             && *protocol_version == 1
             && bounded(host_name, 255)
-            && bounded(host_version, 128) =>
-        {
-            Ok(())
-        }
+            && bounded(host_version, 128))
+        .then_some(())
+        .ok_or(ProtocolError::Invalid),
         HostMessage::TestDestinationResult {
             request_id,
             destination,
             ..
-        } if bounded(request_id, 128) && absolute(destination) => Ok(()),
+        } => (bounded(request_id, 128) && absolute(destination))
+            .then_some(())
+            .ok_or(ProtocolError::Invalid),
         HostMessage::SaveResult {
             request_id,
             session_id,
             saved_path,
-        } if bounded(request_id, 128) && uuid(session_id) && absolute(saved_path) => Ok(()),
+        } => (bounded(request_id, 128) && uuid(session_id) && absolute(saved_path))
+            .then_some(())
+            .ok_or(ProtocolError::Invalid),
         HostMessage::Ack {
             request_id,
             session_id,
             media_id,
             ..
-        } if bounded(request_id, 128)
+        } => (bounded(request_id, 128)
             && session_id.as_deref().is_none_or(uuid)
-            && media_id.as_deref().is_none_or(|v| bounded(v, 128)) =>
-        {
-            Ok(())
-        }
+            && optional_bounded(media_id, 128))
+        .then_some(())
+        .ok_or(ProtocolError::Invalid),
         HostMessage::Warning {
             request_id,
             session_id,
@@ -299,26 +366,37 @@ fn validate_host(message: &HostMessage) -> Result<(), ProtocolError> {
             session_id,
             code,
             message,
-        } if request_id.as_deref().is_none_or(|v| bounded(v, 128))
+        } => (optional_bounded(request_id, 128)
             && session_id.as_deref().is_none_or(uuid)
             && bounded(code, 128)
-            && bounded(message, 4096) =>
-        {
-            Ok(())
-        }
-        _ => Err(ProtocolError::Invalid),
+            && bounded(message, 4096))
+        .then_some(())
+        .ok_or(ProtocolError::Invalid),
     }
 }
 pub fn parse_client(value: serde_json::Value) -> Result<ClientMessage, ProtocolError> {
+    if value
+        .as_object()
+        .is_some_and(|object| object.get("reason").is_some_and(serde_json::Value::is_null))
+    {
+        return Err(ProtocolError::Invalid);
+    }
     let mut message = serde_json::from_value(value).map_err(|_| ProtocolError::Invalid)?;
     validate_client(&mut message)?;
     Ok(message)
 }
 pub fn parse_host(value: serde_json::Value) -> Result<HostMessage, ProtocolError> {
-    let message = serde_json::from_value(value).map_err(|_| ProtocolError::Invalid)?;
-    validate_host(&message)?;
+    if value.as_object().is_some_and(|object| {
+        ["requestId", "sessionId", "mediaId", "sequence"]
+            .iter()
+            .any(|key| object.get(*key).is_some_and(serde_json::Value::is_null))
+    }) {
+        return Err(ProtocolError::Invalid);
+    }
+    let mut message = serde_json::from_value(value).map_err(|_| ProtocolError::Invalid)?;
+    validate_host(&mut message)?;
     Ok(message)
 }
 pub(crate) fn checked_host(message: &HostMessage) -> Result<(), ProtocolError> {
-    validate_host(message)
+    validate_host(&mut message.clone())
 }

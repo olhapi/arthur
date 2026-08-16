@@ -89,3 +89,27 @@ pub fn encode_frame(message: &HostMessage) -> Result<Vec<u8>, FrameError> {
     frame.extend(payload);
     Ok(frame)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        let mut result = (payload.len() as u32).to_le_bytes().to_vec();
+        result.extend(payload);
+        result
+    }
+
+    #[test]
+    fn failure_clears_the_buffer_and_never_inspects_later_bytes() {
+        let mut decoder = FrameDecoder::new();
+        assert_eq!(decoder.push(&[0, 0, 0, 0]), Err(FrameError::ZeroLength));
+        assert!(decoder.buffered.is_empty());
+
+        let valid = frame(br#"{"later":true}"#);
+        assert_eq!(decoder.push(&valid), Err(FrameError::Poisoned));
+        assert!(decoder.buffered.is_empty());
+        assert_eq!(decoder.finish(), Err(FrameError::Poisoned));
+        assert!(decoder.buffered.is_empty());
+    }
+}

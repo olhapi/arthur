@@ -25,11 +25,23 @@ describe("Rust toolchain adapter", () => {
     expect(resolveToolchain(deps)).toEqual({ cargo: "/toolchains/1.97.1/bin/cargo", rustc: "/toolchains/1.97.1/bin/rustc", bin: "/toolchains/1.97.1/bin" });
     expect(deps.execFileSync).toHaveBeenNthCalledWith(1, "brew", ["--prefix", "rustup"], { encoding: "utf8" });
     expect(deps.execFileSync).toHaveBeenNthCalledWith(2, "/brew/rustup/bin/rustup", ["which", "cargo", "--toolchain", "1.97.1"], { encoding: "utf8" });
+    expect(deps.execFileSync).toHaveBeenNthCalledWith(3, "/brew/rustup/bin/rustup", ["which", "rustc", "--toolchain", "1.97.1"], { encoding: "utf8" });
   });
 
   it("rejects adjacent version prefixes and missing resolution", () => {
+    expect(() => resolveToolchain(dependencies(["/brew\n", "/cargo\n", "/rustc\n", "cargo 1.97.0\n", "rustc 1.97.1\n"]).deps)).toThrow(/cargo 1.97.1/i);
     expect(() => resolveToolchain(dependencies(["/brew\n", "/cargo\n", "/rustc\n", "cargo 1.97.10\n", "rustc 1.97.1\n"]).deps)).toThrow(/cargo 1.97.1/i);
+    expect(() => resolveToolchain(dependencies(["/brew\n", "/cargo\n", "/rustc\n", "cargo 1.97.1\n", "rustc 1.97.0\n"]).deps)).toThrow(/rustc 1.97.1/i);
+    expect(() => resolveToolchain(dependencies(["/brew\n", "/cargo\n", "/rustc\n", "cargo 1.97.1\n", "rustc 1.97.10\n"]).deps)).toThrow(/rustc 1.97.1/i);
     expect(() => resolveToolchain(dependencies(["/brew\n", "\n"]).deps)).toThrow(/resolve/i);
+    expect(() => resolveToolchain(dependencies(["/brew\n", "/cargo\n", "/rustc\n", "cargo 1a97b1\n", "rustc 1.97.1\n"]).deps)).toThrow(/cargo 1.97.1/i);
+  });
+
+  it("surfaces an execFileSync toolchain-resolution failure", () => {
+    const { deps } = dependencies();
+    const failure = new Error("rustup resolution failed");
+    deps.execFileSync.mockImplementation(() => { throw failure; });
+    expect(() => resolveToolchain(deps)).toThrow(failure);
   });
 
   it("spawns with an isolated exact compiler environment", async () => {
@@ -51,5 +63,18 @@ describe("Rust toolchain adapter", () => {
     await expect(result).resolves.toBe(23);
     expect(signalHandlers.size).toBe(0);
     expect(deps.off).toHaveBeenCalledWith("SIGINT", expect.any(Function));
+  });
+
+  it("forwards every supported signal and re-emits a child signal exit", async () => {
+    const { child, deps, signalHandlers } = dependencies();
+    const result = runCargo(["test"], deps);
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) signalHandlers.get(signal)?.();
+    expect(child.kill).toHaveBeenNthCalledWith(1, "SIGINT");
+    expect(child.kill).toHaveBeenNthCalledWith(2, "SIGTERM");
+    expect(child.kill).toHaveBeenNthCalledWith(3, "SIGHUP");
+    child.emit("close", null, "SIGHUP");
+    await expect(result).resolves.toBe(0);
+    expect(deps.exit).toHaveBeenCalledWith("SIGHUP");
+    expect(signalHandlers.size).toBe(0);
   });
 });
