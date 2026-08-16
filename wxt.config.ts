@@ -1,5 +1,7 @@
 import { defineConfig } from "wxt";
 
+import { CHROMIUM_PUBLIC_KEY_DER_BASE64 } from "./scripts/native-host/identity.mjs";
+
 export default defineConfig({
   hooks: {
     // WXT discovers every TypeScript file beneath entrypoints. Keep the
@@ -11,6 +13,7 @@ export default defineConfig({
     },
   },
   manifest: {
+    key: CHROMIUM_PUBLIC_KEY_DER_BASE64,
     action: {},
     permissions: ["activeTab", "storage", "nativeMessaging"],
     host_permissions: ["http://*/*", "https://*/*"],

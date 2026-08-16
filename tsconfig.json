@@ -15,6 +15,7 @@
     "src/article/**/*.ts",
     "src/background/**/*.ts",
     "entrypoints/**/*.ts",
+    "scripts/**/*.ts",
     "wxt.config.ts",
     "vitest.config.ts"
   ],
