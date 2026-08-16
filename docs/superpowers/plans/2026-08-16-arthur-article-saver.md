@@ -29,6 +29,7 @@
 - The Rust crate's only direct runtime dependencies are `serde` 1.0.229, `serde_json` 1.0.151, `rustix` 1.1.4, `url` 2.5.8, `sha2` 0.11.0, and `base64` 0.23.1, with the exact features in Task 3.
 - Third-party dependencies must be actively maintained, non-deprecated, necessary, audited, and pinned exactly in `pnpm-lock.yaml` and `native/Cargo.lock`.
 - `cargo audit --file native/Cargo.lock` is mandatory. If cargo-audit 0.22.2 cannot be installed and version-verified, stop; never skip or weaken the gate.
+- Every native build/gate command resolves `$(brew --prefix rustup)/bin` and explicitly selects toolchain 1.97.1; never invoke the unrelated plain Homebrew `cargo` 1.94. This is build-time only and does not change the installed host's independence from Homebrew and Node.
 - Every behavior task follows red-green-refactor and ends in a Conventional Commit.
 - Terra implements each SDD task; Sol performs the independent specification and quality reviews before the task is accepted.
 
@@ -389,7 +390,28 @@ Expected: article tests pass with original media URLs represented once and unsaf
 - `VaultProbe` is `{ canonical_destination: PathBuf, writable: bool }`. `VaultError` has stable variants `InvalidDestination`, `NotDirectory`, `NotWritable`, `UnsafeChild`, `InvalidName`, `InvalidSource`, `InvalidTransition`, `MediaLimitExceeded`, `AttachmentConflict`, `UnresolvedPlaceholder`, and `Io`; path-bearing I/O details remain private.
 - `FrameDecoder` has only `Active` and `Poisoned` states. Every length, framing, UTF-8, or JSON error transitions to `Poisoned`; every later `push` returns `FrameError::Poisoned` without inspecting its bytes.
 
-- [ ] **Step 1: Record the verified Rust toolchain and dependency review**
+- [ ] **Step 1: Resolve and verify the keg-only Rust toolchain and audit executable**
+
+Homebrew installs rustup keg-only, so the unrelated plain Homebrew Cargo on `PATH` must not be used. Resolve the prefix at runtime so the same plan works on Apple Silicon and Intel. Install Homebrew rustup only when its prefix lookup fails, then select/verify the exact toolchain and audit executable:
+
+```bash
+if ! brew --prefix rustup >/dev/null 2>&1; then
+  rtk brew install rustup
+fi
+RUSTUP_BIN="$(brew --prefix rustup)/bin"
+rtk "$RUSTUP_BIN/rustup" toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+rtk "$RUSTUP_BIN/rustc" +1.97.1 --version
+rtk "$RUSTUP_BIN/cargo" +1.97.1 --version
+CARGO_AUDIT_BIN="${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit"
+if [ ! -x "$CARGO_AUDIT_BIN" ] || [ "$("$CARGO_AUDIT_BIN" --version)" != "cargo-audit 0.22.2" ]; then
+  rtk "$RUSTUP_BIN/cargo" +1.97.1 install cargo-audit --version 0.22.2 --locked
+fi
+rtk "$CARGO_AUDIT_BIN" --version
+```
+
+Expected: the rustc proxy reports `rustc 1.97.1`, the cargo proxy resolves toolchain 1.97.1, and the standard Cargo-bin executable reports `cargo-audit 0.22.2`. Current setup already satisfies these checks; the condition is for reproducible recovery. If the prefix lookup, toolchain selection, install, or version check fails, stop the task. Do not temporarily export `PATH`, use plain `cargo`, remove `audit:native`, or substitute `cargo tree`, `cargo deny`, or a registry search for the audit.
+
+- [ ] **Step 2: Record the verified dependency review through the selected Cargo proxy**
 
 Add a Rust table to `docs/dependencies.md` with these exact pins and the repository activity observed on 2026-08-16:
 
@@ -405,34 +427,21 @@ Add a Rust table to `docs/dependencies.md` with these exact pins and the reposit
 Recheck, rather than assuming the recorded snapshot is still current:
 
 ```bash
-rtk cargo search serde --limit 1
-rtk cargo search serde_json --limit 1
-rtk cargo search rustix --limit 1
-rtk cargo search url --limit 1
-rtk cargo search sha2 --limit 1
-rtk cargo search base64 --limit 1
-rtk cargo info serde@1.0.229
-rtk cargo info serde_json@1.0.151
-rtk cargo info rustix@1.1.4
-rtk cargo info url@2.5.8
-rtk cargo info sha2@0.11.0
-rtk cargo info base64@0.23.1
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search serde --limit 1
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search serde_json --limit 1
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search rustix --limit 1
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search url --limit 1
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search sha2 --limit 1
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 search base64 --limit 1
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info serde@1.0.229
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info serde_json@1.0.151
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info rustix@1.1.4
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info url@2.5.8
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info sha2@0.11.0
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 info base64@0.23.1
 ```
 
 Inspect each listed primary repository and the current RustSec database. If a pin is yanked, deprecated, inactive without an acceptable maintainer explanation, or newly vulnerable, stop and report the evidence; do not choose another version or crate silently.
-
-- [ ] **Step 2: Install and verify the mandatory audit tool before relying on it**
-
-The design check found that `cargo audit` is not installed. Install the exact reviewed release and verify the executable before continuing:
-
-```bash
-rtk rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
-rtk rustup run 1.97.1 rustc --version
-rtk cargo +1.97.1 install cargo-audit --version 0.22.2 --locked
-rtk cargo audit --version
-```
-
-Expected: `rustc 1.97.1` and `cargo-audit 0.22.2`. If `rustup`, the toolchain download, the install, or the version check fails, stop the task. Do not remove `audit:native` from any script and do not substitute `cargo tree`, `cargo deny`, or a registry search for the audit.
 
 - [ ] **Step 3: Replace the rejected Node-native configuration and write shared contract fixtures**
 
@@ -515,11 +524,11 @@ Update `package.json` to remove the native `tsc` invocation and add these exact 
 ```json
 {
   "typecheck": "wxt prepare && tsc --noEmit",
-  "test:native": "cargo test --manifest-path native/Cargo.toml --locked",
-  "format:native:check": "cargo fmt --manifest-path native/Cargo.toml --all -- --check",
-  "lint:native": "cargo clippy --manifest-path native/Cargo.toml --all-targets --locked -- -D warnings",
-  "audit:native": "cargo audit --file native/Cargo.lock",
-  "build:native": "cargo build --manifest-path native/Cargo.toml --release --locked",
+  "test:native": "\"$(brew --prefix rustup)/bin/cargo\" +1.97.1 test --manifest-path native/Cargo.toml --locked",
+  "format:native:check": "\"$(brew --prefix rustup)/bin/cargo\" +1.97.1 fmt --manifest-path native/Cargo.toml --all -- --check",
+  "lint:native": "\"$(brew --prefix rustup)/bin/cargo\" +1.97.1 clippy --manifest-path native/Cargo.toml --all-targets --locked -- -D warnings",
+  "audit:native": "test \"$(\"${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit\" --version)\" = \"cargo-audit 0.22.2\" && PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\" \"$(brew --prefix rustup)/bin/cargo\" +1.97.1 audit --file native/Cargo.lock",
+  "build:native": "\"$(brew --prefix rustup)/bin/cargo\" +1.97.1 build --manifest-path native/Cargo.toml --release --locked",
   "verify:native": "pnpm test:native && pnpm format:native:check && pnpm lint:native && pnpm build:native && pnpm audit:native",
   "build": "pnpm build:native && pnpm build:chrome && pnpm build:edge && pnpm build:firefox",
   "verify": "pnpm test && pnpm typecheck && pnpm verify:native && pnpm build && pnpm audit --audit-level high"
@@ -530,7 +539,7 @@ Add `native/target/` to `.gitignore`, run `rtk pnpm install --frozen-lockfile=fa
 
 ```bash
 rtk pnpm test -- src/shared/protocol.contract.test.ts
-rtk cargo test --manifest-path native/Cargo.toml --test contracts
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 test --manifest-path native/Cargo.toml --test contracts
 ```
 
 Expected: the TypeScript fixture test passes against canonical Zod; Rust compilation fails because `protocol`, `framing`, and `vault` are not implemented.
@@ -595,12 +604,12 @@ Keep filename and frontmatter behavior private in `names.rs` and `frontmatter.rs
 Run in this order:
 
 ```bash
-rtk cargo generate-lockfile --manifest-path native/Cargo.toml
-rtk cargo test --manifest-path native/Cargo.toml --locked
-rtk cargo fmt --manifest-path native/Cargo.toml --all -- --check
-rtk cargo clippy --manifest-path native/Cargo.toml --all-targets --locked -- -D warnings
-rtk cargo build --manifest-path native/Cargo.toml --release --locked
-rtk cargo audit --file native/Cargo.lock
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 generate-lockfile --manifest-path native/Cargo.toml
+rtk pnpm test:native
+rtk pnpm format:native:check
+rtk pnpm lint:native
+rtk pnpm build:native
+rtk pnpm audit:native
 rtk pnpm test -- src/shared/protocol.contract.test.ts
 rtk pnpm typecheck
 rtk pnpm audit --audit-level high
@@ -658,7 +667,7 @@ In `native/tests/vault_transaction.rs`, construct `SaveSpec` and `MediaSpec` val
 Run:
 
 ```bash
-rtk cargo test --manifest-path native/Cargo.toml --test vault_transaction
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 test --manifest-path native/Cargo.toml --test vault_transaction
 ```
 
 Expected: FAIL because `Vault::begin`, `VaultTransaction`, and `vault/transaction.rs` do not exist.
@@ -721,7 +730,7 @@ Capture stdout and stderr separately and validate every stdout value against a `
 Run:
 
 ```bash
-rtk cargo test --manifest-path native/Cargo.toml --test server --test native_host
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 test --manifest-path native/Cargo.toml --test server --test native_host
 ```
 
 Expected: FAIL because the session adapter, dispatcher, and binary adapter do not exist.
@@ -1043,9 +1052,9 @@ Set the final scripts exactly:
 First verify the audit executable; a missing/mismatched tool blocks release:
 
 ```bash
-rtk cargo audit --version
+rtk zsh -lc 'test "$("${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit" --version)" = "cargo-audit 0.22.2"'
 rtk pnpm install --frozen-lockfile
-rtk cargo fetch --manifest-path native/Cargo.toml --locked
+rtk "$(brew --prefix rustup)/bin/cargo" +1.97.1 fetch --manifest-path native/Cargo.toml --locked
 rtk pnpm verify
 rtk pnpm zip
 rtk git diff --check
