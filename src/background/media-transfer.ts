@@ -1,6 +1,6 @@
 import type { ExtractedMedia } from "../article/extract.js";
 import { MEDIA_LIMITS, NATIVE_CHUNK_BYTES } from "../shared/constants.js";
-import { NativeClient, type NativeMediaKind } from "./native-client.js";
+import { NativeClient, NativeDisconnectedError, type NativeMediaKind } from "./native-client.js";
 
 export type PreparedMedia =
   | {
@@ -120,6 +120,45 @@ function toBase64(bytes: Uint8Array): string {
   return result;
 }
 
+function terminalReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new NativeDisconnectedError();
+}
+
+function throwIfTerminal(signal: AbortSignal): void {
+  if (signal.aborted) throw terminalReason(signal);
+}
+
+function readWithTerminal(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal.aborted) return Promise.reject(terminalReason(signal));
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (complete: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      complete();
+    };
+    const onAbort = (): void => finish(() => reject(terminalReason(signal)));
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      void reader.read().then(
+        (result) => finish(() => {
+          if (signal.aborted) reject(terminalReason(signal));
+          else resolve(result);
+        }),
+        (error: unknown) => finish(() => reject(error)),
+      );
+    } catch (error) {
+      finish(() => reject(error));
+    }
+  });
+}
+
 async function streamChunks(response: Response, client: NativeClient, mediaId: string): Promise<number> {
   const body = response.body;
   if (body === null) return 0;
@@ -129,7 +168,8 @@ async function streamChunks(response: Response, client: NativeClient, mediaId: s
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithTerminal(reader, client.terminalSignal);
+      throwIfTerminal(client.terminalSignal);
       if (done) break;
       if (value === undefined || value.byteLength === 0) continue;
       let offset = 0;
@@ -166,10 +206,12 @@ async function streamChunks(response: Response, client: NativeClient, mediaId: s
     return sequence;
   } catch (error) {
     try {
-      await reader.cancel();
+      const cancellation = reader.cancel();
+      if (client.terminalSignal.aborted) void cancellation.catch(() => undefined);
+      else await cancellation;
     } catch {
-      // The fallback completion below is still valid if cancellation races a
-      // network failure or an already-closed response stream.
+      // The original transfer error remains authoritative if cancellation
+      // races a network failure or an already-closed response stream.
     }
     throw error;
   } finally {

@@ -277,6 +277,59 @@ describe("transferMedia", () => {
     expect(client.sessionId).toBeUndefined();
   });
 
+  it("interrupts a pending reader promptly when the native client disconnects", async () => {
+    const port = new TransferPort();
+    const client = await activeClient(port);
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+        return new Promise<void>(() => undefined);
+      },
+    });
+    let failure: unknown;
+    let settled = false;
+    void transferMedia(prepared(new Response(body)), client).catch((error: unknown) => {
+      failure = error;
+      settled = true;
+    });
+    await settle();
+
+    port.onDisconnect.emit(undefined);
+    await settle();
+
+    expect(settled).toBe(true);
+    expect(failure).toBeInstanceOf(NativeDisconnectedError);
+    expect(cancelled).toBe(true);
+    expect(body.locked).toBe(false);
+    expect(port.posted.some((message) => message.type === "media_chunk" || message.type === "end_media")).toBe(false);
+  });
+
+  it("preserves disconnect when a pending reader yields after the client closes", async () => {
+    const port = new TransferPort();
+    const client = await activeClient(port);
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(nextController) {
+        controller = nextController;
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const saving = transferMedia(prepared(new Response(body)), client);
+    await settle();
+
+    port.onDisconnect.emit(undefined);
+    controller?.enqueue(new Uint8Array(NATIVE_CHUNK_BYTES));
+
+    await expect(saving).rejects.toBeInstanceOf(NativeDisconnectedError);
+    expect(cancelled).toBe(true);
+    expect(body.locked).toBe(false);
+    expect(port.posted.some((message) => message.type === "media_chunk" || message.type === "end_media")).toBe(false);
+  });
+
   it("enforces an unknown-length individual budget incrementally", async () => {
     const port = new TransferPort();
     port.fallbackOnEnd = true;

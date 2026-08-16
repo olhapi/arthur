@@ -35,6 +35,7 @@ class RecordingStatus implements SaveStatus {
 
 class FakeNativeClient {
   readonly calls: string[] = [];
+  readonly terminalSignal = new AbortController().signal;
   beginMarkdown: string | undefined;
   sessionId: string | undefined;
   helloError: Error | undefined;

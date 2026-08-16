@@ -206,6 +206,29 @@ describe("NativeClient", () => {
     expect(port.destinationLocked).toBe(false);
   });
 
+  it("preserves the terminal cause before validating later public requests and chunks", async () => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });
+    port.emitDisconnect();
+    const terminal = await client.hello().catch((error: unknown) => error);
+
+    await expect(
+      client.request({ type: "hello", requestId: "", protocolVersion: 1 } as never),
+    ).rejects.toBe(terminal);
+    await expect(
+      client.sendChunk({ type: "media_chunk", sessionId: "", mediaId: "", sequence: 0, data: "" } as never),
+    ).rejects.toBe(terminal);
+    await expect(
+      client.beginSave({
+        sessionId: "invalid",
+        destination: "relative",
+        source: "not-a-url",
+        title: "",
+        markdown: "",
+      }),
+    ).rejects.toBe(terminal);
+  });
+
   it("terminally closes an active host when commit posting throws and rejects concurrent pending work once", async () => {
     const port = new FakeNativePort();
     const client = new NativeClient(port, { createRequestId: sequentialRequestIds() });

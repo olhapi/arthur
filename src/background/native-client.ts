@@ -175,6 +175,7 @@ export class NativeClient {
   private beginning = false;
   private closed = false;
   private terminalError: Error | undefined;
+  private readonly terminalController = new AbortController();
   private readonly createRequestId: () => string;
   private readonly limits: NativeClientLimits;
 
@@ -192,7 +193,12 @@ export class NativeClient {
     return this.session?.id;
   }
 
+  get terminalSignal(): AbortSignal {
+    return this.terminalController.signal;
+  }
+
   request(message: RequestMessage): Promise<HostMessage> {
+    if (this.closed) return Promise.reject(this.terminalError ?? new NativeDisconnectedError());
     const parsed = ClientMessageSchema.safeParse(message);
     if (!parsed.success) {
       return Promise.reject(new NativeProtocolError("The native request violates the shared protocol."));
@@ -204,7 +210,6 @@ export class NativeClient {
     if (outgoing.requestId === "chunk") {
       return Promise.reject(new NativeStateError("The chunk acknowledgement request ID is reserved."));
     }
-    if (this.closed) return Promise.reject(this.terminalError ?? new NativeDisconnectedError());
     if (this.pendingRequests.has(outgoing.requestId)) {
       return Promise.reject(new NativeStateError("A request with this request ID is already pending."));
     }
@@ -220,6 +225,7 @@ export class NativeClient {
   }
 
   sendChunk(message: ChunkMessage): Promise<HostMessage> {
+    if (this.closed) return Promise.reject(this.terminalError ?? new NativeDisconnectedError());
     const parsed = ClientMessageSchema.safeParse(message);
     if (!parsed.success) {
       return Promise.reject(new NativeProtocolError("The media chunk violates the shared protocol."));
@@ -228,7 +234,6 @@ export class NativeClient {
     if (chunk.type !== "media_chunk") {
       return Promise.reject(new NativeProtocolError("The media chunk violates the shared protocol."));
     }
-    if (this.closed) return Promise.reject(this.terminalError ?? new NativeDisconnectedError());
     if (this.pendingChunk !== undefined) {
       return Promise.reject(new NativeStateError("Only one media chunk may be in flight."));
     }
@@ -276,6 +281,7 @@ export class NativeClient {
   }
 
   async hello(): Promise<Extract<HostMessage, { type: "hello_result" }>> {
+    this.throwIfTerminal();
     const requestId = this.nextRequestId();
     const response = await this.request({ type: "hello", requestId, protocolVersion: PROTOCOL_VERSION });
     this.throwIfTerminal();
@@ -286,6 +292,7 @@ export class NativeClient {
   }
 
   async beginSave(input: BeginSaveRequest): Promise<void> {
+    this.throwIfTerminal();
     if (this.session !== undefined || this.beginning) {
       throw new NativeStateError("A save session is already active.");
     }
@@ -467,6 +474,7 @@ export class NativeClient {
     const error = new NativeDisconnectedError();
     this.closed = true;
     this.terminalError = error;
+    this.terminalController.abort(error);
     this.failAll(error);
   }
 
@@ -478,6 +486,7 @@ export class NativeClient {
     if (this.closed) return;
     this.closed = true;
     this.terminalError = error;
+    this.terminalController.abort(error);
     try {
       this.port.disconnect();
     } catch {
