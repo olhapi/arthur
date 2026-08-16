@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head>
+    <title>All Media Formats</title>
+  </head>
+  <body>
+    <nav>Navigation that should not become the article.</nav>
+    <article class="article-content" onclick="alert('unsafe')">
+      <h1>All Media Formats</h1>
+      <p>
+        This deterministic fixture contains enough readable article prose for extraction while keeping every
+        supported browser media format explicit and local to the document structure. The text is deliberately
+        ordinary so that the extractor is evaluated on meaningful DOM behavior instead of handcrafted mocks.
+      </p>
+      <h2>Preserved heading</h2>
+      <p>Use <a href="/guide">a useful link</a> and mark old guidance as <del>deprecated</del>.</p>
+      <blockquote>A preserved quotation.</blockquote>
+      <ul><li>First item</li><li>Second item</li></ul>
+      <pre><code class="language-ts">const saved: boolean = true;</code></pre>
+      <table>
+        <thead><tr><th>Format</th><th>Extension</th></tr></thead>
+        <tbody><tr><td>Image</td><td>avif</td></tr></tbody>
+      </table>
+      <p><img src="/media/animated.gif" alt="Animated GIF"></p>
+      <p><img src="/media/animated.webp" alt="Animated WebP"></p>
+      <p><img src="/media/diagram.svg" alt="Diagram"></p>
+      <p><img src="/media/photo.avif" alt="Photo"></p>
+      <p><img src="/media/photo.avif" alt="Duplicate photo"></p>
+      <audio controls><source src="/media/audio.mp3" type="audio/mpeg"></audio>
+      <video controls poster="/media/poster.jpg"><source src="/media/video.mp4" type="video/mp4"></video>
+      <iframe src="/embedded/player"></iframe>
+      <script>window.shouldNotRun = true;</script>
+      <form><input value="not article content"></form>
+    </article>
+  </body>
+</html>
