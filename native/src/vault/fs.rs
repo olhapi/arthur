@@ -24,6 +24,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 pub(super) struct FileFingerprint {
     pub device: u64,
     pub inode: u64,
+    pub links: u64,
     pub size: u64,
     pub sha256: String,
 }
@@ -233,11 +234,15 @@ pub(super) fn read_open_file_prefix(
     Ok(bytes)
 }
 
-pub(super) fn fingerprint_open_regular_file(
+fn fingerprint_open_regular_file_with_link_policy(
     file: &mut File,
+    allow_detached: bool,
 ) -> Result<FileFingerprint, VaultError> {
     let initial = fstat(&*file).map_err(|_| VaultError::Io)?;
-    if FileType::from_raw_mode(initial.st_mode) != FileType::RegularFile {
+    let permitted_initial_links =
+        initial.st_nlink == 1 || (allow_detached && initial.st_nlink == 0);
+    if FileType::from_raw_mode(initial.st_mode) != FileType::RegularFile || !permitted_initial_links
+    {
         return Err(VaultError::UnsafeChild);
     }
     let size = u64::try_from(initial.st_size).map_err(|_| VaultError::UnsafeChild)?;
@@ -256,12 +261,15 @@ pub(super) fn fingerprint_open_regular_file(
     if initial.st_dev != final_metadata.st_dev
         || initial.st_ino != final_metadata.st_ino
         || initial.st_size != final_metadata.st_size
+        || initial.st_nlink != final_metadata.st_nlink
+        || !(final_metadata.st_nlink == 1 || (allow_detached && final_metadata.st_nlink == 0))
     {
         return Err(VaultError::UnsafeChild);
     }
     Ok(FileFingerprint {
         device: initial.st_dev as u64,
         inode: initial.st_ino as u64,
+        links: initial.st_nlink as u64,
         size,
         sha256: hasher
             .finalize()
@@ -269,6 +277,18 @@ pub(super) fn fingerprint_open_regular_file(
             .map(|byte| format!("{byte:02x}"))
             .collect(),
     })
+}
+
+pub(super) fn fingerprint_open_regular_file(
+    file: &mut File,
+) -> Result<FileFingerprint, VaultError> {
+    fingerprint_open_regular_file_with_link_policy(file, false)
+}
+
+pub(super) fn fingerprint_open_regular_file_allow_detached(
+    file: &mut File,
+) -> Result<FileFingerprint, VaultError> {
+    fingerprint_open_regular_file_with_link_policy(file, true)
 }
 
 pub(super) fn identity_open_regular_file(file: &File) -> Result<FileIdentity, VaultError> {
@@ -474,6 +494,21 @@ pub(super) fn child_exists(root: &OwnedFd, name: &str) -> Result<bool, VaultErro
     validate_basename(name)?;
     match statat(root, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(_) => Ok(true),
+        Err(Errno::NOENT) => Ok(false),
+        Err(_) => Err(VaultError::Io),
+    }
+}
+
+pub(super) fn child_is_hard_linked_regular_file(
+    root: &OwnedFd,
+    name: &str,
+) -> Result<bool, VaultError> {
+    validate_basename(name)?;
+    match statat(root, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata) => Ok(
+            FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile
+                && metadata.st_nlink != 1,
+        ),
         Err(Errno::NOENT) => Ok(false),
         Err(_) => Err(VaultError::Io),
     }

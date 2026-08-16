@@ -576,7 +576,14 @@ impl VaultTransaction {
             return Err(VaultError::AttachmentConflict);
         }
         if fs::child_exists(&self.attachments, &attachment_name)? {
-            let retained = verified_attachment(&self.attachments, &attachment_name, &digest)?;
+            let retained = match verified_attachment(&self.attachments, &attachment_name, &digest) {
+                Ok(retained) => retained,
+                Err(VaultError::UnsafeChild | VaultError::Io) => {
+                    self.slot.quarantine();
+                    return Err(VaultError::AttachmentConflict);
+                }
+                Err(error) => return Err(error),
+            };
             if let Some(MediaState::Finished(media)) = self.media.get_mut(media_id) {
                 media.retained = Some(retained);
             }
@@ -670,11 +677,23 @@ impl VaultTransaction {
         let Some(MediaState::Finished(media)) = self.media.get_mut(media_id) else {
             unreachable!()
         };
-        if let Some(retained) = media.retained.as_mut()
-            && (fs::fingerprint_open_regular_file(&mut retained.file)? != retained.fingerprint
-                || retained.fingerprint.sha256 != digest)
-        {
-            return Err(VaultError::AttachmentConflict);
+        if let Some(retained) = media.retained.as_mut() {
+            // A retained descriptor can be temporarily detached after an
+            // attacker (or another writer) removes the equal final attachment
+            // before we install our staged copy.  The descriptor itself is
+            // still authoritative only while it remains the same regular file
+            // with zero or one links; every visible path is re-opened below
+            // with the stricter one-link policy.
+            let current = fs::fingerprint_open_regular_file_allow_detached(&mut retained.file)
+                .map_err(|_| VaultError::AttachmentConflict)?;
+            if current.device != retained.fingerprint.device
+                || current.inode != retained.fingerprint.inode
+                || current.size != retained.fingerprint.size
+                || current.sha256 != retained.fingerprint.sha256
+                || retained.fingerprint.sha256 != digest
+            {
+                return Err(VaultError::AttachmentConflict);
+            }
         }
         match verified_attachment(&self.attachments, &attachment_name, &digest) {
             Ok(retained) => {
@@ -965,6 +984,10 @@ impl VaultTransaction {
         // `Committed` is the visibility point. Scratch reset is recoverable on
         // the next open and must never turn a durable save into a reported
         // failure.
+        #[cfg(test)]
+        if matches!(self.commit_fault, Some(CommitFault::DescriptorResetFailure)) {
+            self.slot.fail_next_reset();
+        }
         let _ = self.slot.reset_to_empty();
         Ok(SavedNote {
             display_path: self.canonical_destination.join(target),
@@ -1215,6 +1238,7 @@ enum CommitFault {
     ReplaceEqualAttachmentWithFifoBeforeNote,
     CreateEqualDuringMissingAttachmentInstall,
     AfterSourceExchange,
+    DescriptorResetFailure,
 }
 
 #[cfg(test)]
@@ -1782,6 +1806,72 @@ mod tests {
                 .unwrap()
                 .contains("new body")
         );
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
+    fn source_exchange_directory_sync_failure_recovers_new_visibility_and_reuses_the_slot() {
+        let destination = temp();
+        write_old_article(&destination);
+        let transaction = Vault::open(&destination)
+            .unwrap()
+            .begin(save("new body"))
+            .unwrap();
+        assert_eq!(
+            transaction.commit_with_fault(CommitFault::SourceExchangeSyncFailure),
+            Err(VaultError::Io)
+        );
+        assert!(
+            fs::read_to_string(destination.join("Article.md"))
+                .unwrap()
+                .contains("new body")
+        );
+
+        drop(Vault::open(&destination).unwrap());
+        assert!(
+            fs::read_to_string(destination.join("Article.md"))
+                .unwrap()
+                .contains("new body")
+        );
+        let slot = destination.join(workspace::WORKSPACE_NAME).join("slot-0");
+        assert_eq!(fs::read(slot.join(workspace::NEW_NOTE)).unwrap(), b"");
+        assert_eq!(fs::read(slot.join(workspace::OLD_BACKUP)).unwrap(), b"");
+        Vault::open(&destination)
+            .unwrap()
+            .begin(save("later"))
+            .unwrap()
+            .abort()
+            .unwrap();
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
+    fn committed_note_survives_descriptor_reset_failure_and_later_recovery() {
+        let destination = temp();
+        let old = write_old_article(&destination);
+        let saved = Vault::open(&destination)
+            .unwrap()
+            .begin(save("new body"))
+            .unwrap()
+            .commit_with_fault(CommitFault::DescriptorResetFailure)
+            .unwrap();
+        assert!(
+            fs::read_to_string(&saved.display_path)
+                .unwrap()
+                .contains("new body")
+        );
+        let slot = destination.join(workspace::WORKSPACE_NAME).join("slot-0");
+        assert_eq!(fs::read(slot.join(workspace::NEW_NOTE)).unwrap(), old);
+        assert_eq!(fs::read(slot.join(workspace::OLD_BACKUP)).unwrap(), old);
+
+        drop(Vault::open(&destination).unwrap());
+        assert!(
+            fs::read_to_string(saved.display_path)
+                .unwrap()
+                .contains("new body")
+        );
+        assert_eq!(fs::read(slot.join(workspace::NEW_NOTE)).unwrap(), b"");
+        assert_eq!(fs::read(slot.join(workspace::OLD_BACKUP)).unwrap(), b"");
         fs::remove_dir_all(destination).unwrap();
     }
 

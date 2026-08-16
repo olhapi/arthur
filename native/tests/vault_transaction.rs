@@ -488,6 +488,45 @@ fn rejects_an_existing_same_name_with_different_full_digest_before_a_note_is_vis
 }
 
 #[test]
+fn hard_linked_final_attachment_conflicts_without_changing_either_link() {
+    let destination = temp();
+    let attachment_name = "hero--9f86d081884c.webp";
+    let attachment = destination.join("attachments").join(attachment_name);
+    let alias = destination.join("attachment-alias");
+    fs::create_dir(destination.join("attachments")).unwrap();
+    fs::write(&attachment, b"test").unwrap();
+    fs::hard_link(&attachment, &alias).unwrap();
+
+    let mut transaction = Vault::open(&destination)
+        .unwrap()
+        .begin(save_spec(
+            "https://example.test/article",
+            "Article",
+            &format!("arthur-media://{}", media_id("one")),
+        ))
+        .unwrap();
+    transaction
+        .begin_media(media_spec(
+            "one",
+            "https://cdn.example.test/hero.webp",
+            MediaKind::Image,
+            "image/webp",
+            Some(4),
+        ))
+        .unwrap();
+    transaction
+        .append_chunk(media_id("one"), 0, b"test")
+        .unwrap();
+    transaction.finish_media(media_id("one"), 1).unwrap();
+
+    assert_eq!(transaction.commit(), Err(VaultError::AttachmentConflict));
+    assert_eq!(fs::read(&attachment).unwrap(), b"test");
+    assert_eq!(fs::read(&alias).unwrap(), b"test");
+    assert!(!destination.join("Article.md").exists());
+    fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
 fn handles_known_unknown_and_empty_declared_lengths() {
     let destination = temp();
     let mut transaction = Vault::open(&destination)

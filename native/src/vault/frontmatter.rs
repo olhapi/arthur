@@ -65,8 +65,10 @@ pub(super) fn find_existing_article(
             continue;
         };
         if normalize_source(&stored_source).is_ok_and(|source| source == incoming_source) {
-            let Ok(fingerprint) = fs::fingerprint_open_regular_file(&mut file) else {
-                continue;
+            let fingerprint = match fs::fingerprint_open_regular_file(&mut file) {
+                Ok(fingerprint) => fingerprint,
+                Err(VaultError::UnsafeChild) => return Err(VaultError::SourceConflict),
+                Err(error) => return Err(error),
             };
             return Ok(Some(ExistingArticle {
                 name,
@@ -88,7 +90,12 @@ pub(super) fn verifies_existing_article_source(
         return Ok(false);
     }
     let incoming_source = normalize_source(incoming_source)?;
-    if fs::fingerprint_open_regular_file(&mut existing.verified_file)? != existing.fingerprint {
+    let held_fingerprint = match fs::fingerprint_open_regular_file(&mut existing.verified_file) {
+        Ok(fingerprint) => fingerprint,
+        Err(VaultError::UnsafeChild) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if held_fingerprint != existing.fingerprint {
         return Ok(false);
     }
     let mut file = match fs::open_regular_file(destination, &existing.name) {
@@ -96,7 +103,12 @@ pub(super) fn verifies_existing_article_source(
         Err(VaultError::UnsafeChild | VaultError::Io) => return Ok(false),
         Err(error) => return Err(error),
     };
-    if fs::fingerprint_open_regular_file(&mut file)? != existing.fingerprint {
+    let visible_fingerprint = match fs::fingerprint_open_regular_file(&mut file) {
+        Ok(fingerprint) => fingerprint,
+        Err(VaultError::UnsafeChild) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if visible_fingerprint != existing.fingerprint {
         return Ok(false);
     }
     let bytes = fs::read_open_file_prefix(&mut file, MAX_FRONTMATTER_BYTES)?;
