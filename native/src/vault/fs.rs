@@ -20,6 +20,12 @@ use std::{
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_NEXT_CLASSIFY_CHILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_NEXT_FINGERPRINT_REGULAR_FILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct FileFingerprint {
     pub device: u64,
@@ -33,6 +39,16 @@ pub(super) struct FileFingerprint {
 pub(super) struct FileIdentity {
     pub device: u64,
     pub inode: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChildKind {
+    Missing,
+    OneLinkRegular,
+    HardLinkedRegular,
+    Symlink,
+    Fifo,
+    Other,
 }
 
 fn directory_flags() -> OFlags {
@@ -320,6 +336,10 @@ pub(super) fn fingerprint_regular_file(
     root: &OwnedFd,
     name: &str,
 ) -> Result<FileFingerprint, VaultError> {
+    #[cfg(test)]
+    if FAIL_NEXT_FINGERPRINT_REGULAR_FILE.with(|fail| fail.replace(false)) {
+        return Err(VaultError::Io);
+    }
     let mut file = open_regular_file(root, name)?;
     fingerprint_open_regular_file(&mut file)
 }
@@ -499,19 +519,35 @@ pub(super) fn child_exists(root: &OwnedFd, name: &str) -> Result<bool, VaultErro
     }
 }
 
-pub(super) fn child_is_hard_linked_regular_file(
-    root: &OwnedFd,
-    name: &str,
-) -> Result<bool, VaultError> {
-    validate_basename(name)?;
-    match statat(root, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(metadata) => Ok(
-            FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile
-                && metadata.st_nlink != 1,
-        ),
-        Err(Errno::NOENT) => Ok(false),
-        Err(_) => Err(VaultError::Io),
+pub(super) fn classify_child(root: &OwnedFd, name: &str) -> Result<ChildKind, VaultError> {
+    #[cfg(test)]
+    if FAIL_NEXT_CLASSIFY_CHILD.with(|fail| fail.replace(false)) {
+        return Err(VaultError::Io);
     }
+    validate_basename(name)?;
+    let metadata = match statat(root, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata) => metadata,
+        Err(Errno::NOENT) => return Ok(ChildKind::Missing),
+        Err(_) => return Err(VaultError::Io),
+    };
+    let kind = match FileType::from_raw_mode(metadata.st_mode) {
+        FileType::RegularFile if metadata.st_nlink == 1 => ChildKind::OneLinkRegular,
+        FileType::RegularFile => ChildKind::HardLinkedRegular,
+        FileType::Symlink => ChildKind::Symlink,
+        FileType::Fifo => ChildKind::Fifo,
+        _ => ChildKind::Other,
+    };
+    Ok(kind)
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_child_classification() {
+    FAIL_NEXT_CLASSIFY_CHILD.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_regular_file_fingerprint() {
+    FAIL_NEXT_FINGERPRINT_REGULAR_FILE.with(|fail| fail.set(true));
 }
 
 pub(super) fn child_directory_matches(

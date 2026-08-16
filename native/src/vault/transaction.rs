@@ -840,7 +840,8 @@ impl VaultTransaction {
             if fs::fingerprint_open_regular_file(&mut existing.verified_file)?
                 != existing.fingerprint
                 || fs::identity_open_regular_file(&existing.verified_file).is_err()
-                || fs::fingerprint_open_regular_file(&mut self.slot.new_note)? != new_fingerprint
+                || fs::fingerprint_open_regular_file(self.slot.new_note_file_mut()?)?
+                    != new_fingerprint
                 || !self.slot.verify_fixed_paths()?
                 || pre_target != NoteIdentity::Old
                 || pre_temporary != NoteIdentity::New
@@ -877,7 +878,8 @@ impl VaultTransaction {
             if fs::identity_open_regular_file(&existing.verified_file).is_err()
                 || fs::fingerprint_open_regular_file(&mut existing.verified_file)?
                     != existing.fingerprint
-                || fs::fingerprint_open_regular_file(&mut self.slot.new_note)? != new_fingerprint
+                || fs::fingerprint_open_regular_file(self.slot.new_note_file_mut()?)?
+                    != new_fingerprint
                 || !self.slot.verify_fixed_paths()?
                 || final_target != NoteIdentity::Old
                 || final_temporary != NoteIdentity::New
@@ -1785,6 +1787,115 @@ mod tests {
         let reopened = Vault::open(&destination).unwrap();
         let next = reopened.begin(save("after recovery")).unwrap();
         next.abort().unwrap();
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
+    fn hard_linked_workspace_owner_blocks_exchange_pending_recovery_without_mutating_target_or_backup()
+     {
+        let destination = temp();
+        write_old_article(&destination);
+        let transaction = Vault::open(&destination)
+            .unwrap()
+            .begin(save("new body"))
+            .unwrap();
+        assert_eq!(
+            transaction.commit_with_fault(CommitFault::BeforeSourceExchange),
+            Err(VaultError::Io)
+        );
+
+        let workspace = destination.join(workspace::WORKSPACE_NAME);
+        let target = destination.join("Article.md");
+        let displaced = destination.join("displaced-article");
+        let backup = workspace.join("slot-0").join(workspace::OLD_BACKUP);
+        fs::rename(&target, &displaced).unwrap();
+        fs::write(&target, b"unrelated target").unwrap();
+        let target_before = fs::read(&target).unwrap();
+        let backup_before = fs::read(&backup).unwrap();
+        fs::hard_link(
+            workspace.join("owner"),
+            destination.join("workspace-owner-alias"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            Vault::open(&destination).err(),
+            Some(VaultError::UnsafeChild)
+        );
+        assert_eq!(fs::read(&target).unwrap(), target_before);
+        assert_eq!(fs::read(&backup).unwrap(), backup_before);
+
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
+    fn late_fixed_child_mismatch_blocks_exchange_pending_recovery_without_mutating_target_or_backup()
+     {
+        let destination = temp();
+        write_old_article(&destination);
+        let transaction = Vault::open(&destination)
+            .unwrap()
+            .begin(save("new body"))
+            .unwrap();
+        assert_eq!(
+            transaction.commit_with_fault(CommitFault::BeforeSourceExchange),
+            Err(VaultError::Io)
+        );
+
+        let workspace = destination.join(workspace::WORKSPACE_NAME);
+        let target = destination.join("Article.md");
+        let displaced = destination.join("displaced-article");
+        let backup = workspace.join("slot-0").join(workspace::OLD_BACKUP);
+        let new_note = workspace.join("slot-0").join(workspace::NEW_NOTE);
+        let displaced_new_note = destination.join("displaced-new-note");
+        fs::rename(&target, &displaced).unwrap();
+        fs::write(&target, b"unrelated target").unwrap();
+        fs::rename(&new_note, &displaced_new_note).unwrap();
+        fs::write(&new_note, b"unrelated fixed child").unwrap();
+        let target_before = fs::read(&target).unwrap();
+        let backup_before = fs::read(&backup).unwrap();
+
+        assert_eq!(
+            Vault::open(&destination).err(),
+            Some(VaultError::UnsafeChild)
+        );
+        assert_eq!(fs::read(&target).unwrap(), target_before);
+        assert_eq!(fs::read(&backup).unwrap(), backup_before);
+        assert_eq!(fs::read(&new_note).unwrap(), b"unrelated fixed child");
+
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
+    fn invalid_later_slot_blocks_exchange_pending_recovery_without_mutating_target_or_backup() {
+        let destination = temp();
+        write_old_article(&destination);
+        let transaction = Vault::open(&destination)
+            .unwrap()
+            .begin(save("new body"))
+            .unwrap();
+        assert_eq!(
+            transaction.commit_with_fault(CommitFault::BeforeSourceExchange),
+            Err(VaultError::Io)
+        );
+
+        let workspace = destination.join(workspace::WORKSPACE_NAME);
+        let target = destination.join("Article.md");
+        let displaced = destination.join("displaced-article");
+        let backup = workspace.join("slot-0").join(workspace::OLD_BACKUP);
+        fs::rename(&target, &displaced).unwrap();
+        fs::write(&target, b"unrelated target").unwrap();
+        let target_before = fs::read(&target).unwrap();
+        let backup_before = fs::read(&backup).unwrap();
+        fs::write(workspace.join("slot-1/owner"), b"unrelated fixed child").unwrap();
+
+        assert_eq!(
+            Vault::open(&destination).err(),
+            Some(VaultError::UnsafeChild)
+        );
+        assert_eq!(fs::read(&target).unwrap(), target_before);
+        assert_eq!(fs::read(&backup).unwrap(), backup_before);
+
         fs::remove_dir_all(destination).unwrap();
     }
 
