@@ -18,7 +18,7 @@ const CLASSIFIED_MEDIA_EXTENSIONS: &[&str] = &[
 // common JPEG/JPEG-2000/SVG aliases without accepting arbitrary suffixes.
 const BROWSER_IMAGE_URL_EXTENSIONS: &[&str] = &[
     "apng", "bmp", "cur", "dib", "heic", "heif", "ico", "jfif", "jpe", "jp2", "jpf", "jpm", "jpx",
-    "jxl", "svgz", "tif", "tiff",
+    "jxl", "pjp", "pjpeg", "svgz", "tif", "tiff",
 ];
 
 #[allow(dead_code)]
@@ -39,7 +39,7 @@ fn mime_extension(value: &str) -> &'static str {
         "image/heic" => "heic",
         "image/heif" => "heif",
         "image/ico" | "image/vnd.microsoft.icon" | "image/x-icon" => "ico",
-        "image/jpeg" => "jpg",
+        "image/jpeg" | "image/pjpeg" => "jpg",
         "image/jp2" | "image/x-jp2" => "jp2",
         "image/jxl" => "jxl",
         "image/png" => "png",
@@ -305,67 +305,94 @@ mod tests {
     }
 
     #[test]
-    fn preserves_all_browser_recognized_audio_and_video_extensions() {
-        for (source, content_type, expected) in [
-            (
-                "https://example.test/track.aac",
-                "application/octet-stream",
-                "aac",
-            ),
-            (
-                "https://example.test/track.opus",
-                "application/octet-stream",
-                "opus",
-            ),
-            (
-                "https://example.test/track.weba",
-                "application/octet-stream",
-                "weba",
-            ),
-            (
-                "https://example.test/clip.m4v",
-                "application/octet-stream",
-                "m4v",
-            ),
-            ("https://example.test/download", "audio/aac", "aac"),
-            ("https://example.test/download", "audio/opus", "opus"),
-            ("https://example.test/download", "audio/webm", "weba"),
-            ("https://example.test/download", "video/x-m4v", "m4v"),
-        ] {
-            assert_eq!(
-                media_stem_and_extension(source, content_type).unwrap().1,
-                expected,
-                "{source} / {content_type}"
-            );
-        }
-    }
-
-    #[test]
-    fn preserves_browser_image_extensions_and_uses_explicit_mime_fallbacks() {
-        for extension in [
-            "apng", "bmp", "dib", "heic", "heif", "ico", "jfif", "jpe", "jxl", "svgz", "tif",
-            "tiff",
+    fn preserves_every_allowlisted_url_extension_and_uses_explicit_mime_aliases() {
+        for (url_extension, expected_extension) in [
+            ("aac", "aac"),
+            ("apng", "apng"),
+            ("avif", "avif"),
+            ("bmp", "bmp"),
+            ("cur", "cur"),
+            ("dib", "dib"),
+            ("flac", "flac"),
+            ("gif", "gif"),
+            ("heic", "heic"),
+            ("heif", "heif"),
+            ("ico", "ico"),
+            ("jfif", "jfif"),
+            ("jpe", "jpe"),
+            ("jpeg", "jpeg"),
+            ("jp2", "jp2"),
+            ("jpf", "jpf"),
+            ("jpm", "jpm"),
+            ("jpx", "jpx"),
+            ("jpg", "jpg"),
+            ("jxl", "jxl"),
+            ("m4a", "m4a"),
+            ("m4v", "m4v"),
+            ("mov", "mov"),
+            ("mp3", "mp3"),
+            ("mp4", "mp4"),
+            ("ogg", "ogg"),
+            ("ogv", "ogv"),
+            ("opus", "opus"),
+            ("pjp", "pjp"),
+            ("pjpeg", "pjpeg"),
+            ("png", "png"),
+            ("svg", "svg"),
+            ("svgz", "svgz"),
+            ("tif", "tif"),
+            ("tiff", "tiff"),
+            ("wav", "wav"),
+            ("weba", "weba"),
+            ("webm", "webm"),
+            ("webp", "webp"),
         ] {
             assert_eq!(
                 media_stem_and_extension(
-                    &format!("https://example.test/hero.{extension}"),
+                    &format!("https://example.test/hero.{url_extension}"),
                     "application/octet-stream",
                 )
                 .unwrap()
                 .1,
-                extension,
+                expected_extension,
+                "URL extension .{url_extension}",
             );
         }
         for (content_type, extension) in [
+            ("audio/aac", "aac"),
+            ("audio/flac", "flac"),
+            ("audio/m4a", "m4a"),
+            ("audio/mp4", "m4a"),
+            ("audio/mpeg", "mp3"),
+            ("audio/ogg", "ogg"),
+            ("audio/opus", "opus"),
+            ("audio/wav", "wav"),
+            ("audio/webm", "weba"),
             ("image/apng", "apng"),
+            ("image/avif", "avif"),
             ("image/bmp", "bmp"),
+            ("image/x-bmp", "bmp"),
             ("image/x-ms-bmp", "bmp"),
+            ("image/gif", "gif"),
             ("image/heic", "heic"),
             ("image/heif", "heif"),
+            ("image/ico", "ico"),
             ("image/vnd.microsoft.icon", "ico"),
             ("image/x-icon", "ico"),
+            ("image/jpeg", "jpg"),
+            ("image/pjpeg", "jpg"),
+            ("image/jp2", "jp2"),
+            ("image/x-jp2", "jp2"),
             ("image/jxl", "jxl"),
+            ("image/png", "png"),
+            ("image/svg+xml", "svg"),
             ("image/tiff", "tiff"),
+            ("image/webp", "webp"),
+            ("video/mp4", "mp4"),
+            ("video/ogg", "ogv"),
+            ("video/quicktime", "mov"),
+            ("video/webm", "webm"),
+            ("video/x-m4v", "m4v"),
         ] {
             assert_eq!(
                 media_stem_and_extension("https://example.test/download", content_type)
