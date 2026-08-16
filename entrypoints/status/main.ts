@@ -1,5 +1,8 @@
 import { browser } from "wxt/browser";
 
+import { statusStorageKey } from "../../src/background/status.js";
+import type { RetrySaveResult } from "../background.js";
+
 export interface StoredStatus {
   tabId: number;
   kind: "warning" | "error";
@@ -7,8 +10,8 @@ export interface StoredStatus {
 }
 
 export interface StatusDependencies {
-  loadStatus(): Promise<unknown>;
-  retrySave(): Promise<void>;
+  loadStatus(): Promise<{ tabId: number; status: unknown } | undefined>;
+  retrySave(tabId: number): Promise<RetrySaveResult>;
 }
 
 export interface StatusPage {
@@ -20,11 +23,14 @@ export interface StatusPageBrowser {
   storage: { local: { get(key: string): Promise<Record<string, unknown>> } };
 }
 
-export async function loadStatusForActiveTab(browser: StatusPageBrowser): Promise<unknown> {
+export async function loadStatusForActiveTab(
+  browser: StatusPageBrowser,
+): Promise<{ tabId: number; status: unknown } | undefined> {
   const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
-  const stored = (await browser.storage.local.get("status")).status;
-  if (activeTab?.id === undefined || typeof stored !== "object" || stored === null) return undefined;
-  return (stored as { tabId?: unknown }).tabId === activeTab.id ? stored : undefined;
+  if (activeTab?.id === undefined) return undefined;
+  const key = statusStorageKey(activeTab.id);
+  const stored = (await browser.storage.local.get(key))[key];
+  return { tabId: activeTab.id, status: stored };
 }
 
 function statusFrom(value: unknown): StoredStatus | undefined {
@@ -51,17 +57,31 @@ export function mountStatusPage(document: Document, dependencies: StatusDependen
   const retry = document.querySelector<HTMLButtonElement>("#retry-save");
   if (retry === null) throw new Error("Missing required status element: #retry-save");
 
+  let retryTabId: number | undefined;
+  const renderRetryFailure = (message: string): void => {
+    details.dataset.kind = "error";
+    details.textContent = `Retry failed: ${message}`;
+  };
+
   retry.addEventListener("click", async () => {
     retry.disabled = true;
     try {
-      await dependencies.retrySave();
+      if (retryTabId === undefined) {
+        renderRetryFailure("The original tab is no longer available.");
+        return;
+      }
+      const result = await dependencies.retrySave(retryTabId);
+      if (!result.ok) renderRetryFailure(result.message);
+    } catch {
+      renderRetryFailure("The article could not be saved.");
     } finally {
       retry.disabled = false;
     }
   });
 
-  const ready = dependencies.loadStatus().then((stored) => {
-    const status = statusFrom(stored);
+  const ready = dependencies.loadStatus().then((loaded) => {
+    retryTabId = loaded?.tabId;
+    const status = statusFrom(loaded?.status);
     details.replaceChildren();
     if (status === undefined || status.details.length === 0) {
       details.textContent = "No recent save issues.";
@@ -81,11 +101,26 @@ export function mountStatusPage(document: Document, dependencies: StatusDependen
 
 if (document.querySelector("#status-details") !== null) {
   void mountStatusPage(document, {
-    async loadStatus(): Promise<unknown> {
+    async loadStatus(): Promise<{ tabId: number; status: unknown } | undefined> {
       return loadStatusForActiveTab(browser as unknown as StatusPageBrowser);
     },
-    async retrySave(): Promise<void> {
-      await browser.runtime.sendMessage({ type: "retry_save" });
+    async retrySave(tabId: number): Promise<RetrySaveResult> {
+      const response: unknown = await browser.runtime.sendMessage({ type: "retry_save", tabId });
+      if (typeof response !== "object" || response === null) {
+        return { ok: false, code: "save_failed", message: "The article could not be saved." };
+      }
+      const candidate = response as { ok?: unknown; code?: unknown; message?: unknown };
+      if (Object.keys(response).length === 1 && candidate.ok === true) return { ok: true };
+      if (
+        Object.keys(response).length === 3 &&
+        candidate.ok === false &&
+        (candidate.code === "save_busy" || candidate.code === "tab_unavailable" || candidate.code === "save_failed") &&
+        typeof candidate.message === "string" &&
+        candidate.message !== ""
+      ) {
+        return { ok: false, code: candidate.code, message: candidate.message };
+      }
+      return { ok: false, code: "save_failed", message: "The article could not be saved." };
     },
   }).ready;
 }

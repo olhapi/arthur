@@ -1,7 +1,57 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createBackgroundController } from "./background.js";
+import { createBackgroundController, createStatusBrowserAdapter, registerStatusCleanup } from "./background.js";
 import { registerExtractionListener } from "./content.js";
+import { StatusController, statusStorageKey } from "../src/background/status.js";
+
+const trustedSender = { id: "arthur-extension", url: "moz-extension://arthur-extension/status.html" };
+
+function retryHarness({
+  tab = { id: 31, url: "https://example.test/retry" },
+  setPopup = vi.fn().mockResolvedValue(undefined),
+  save = vi.fn().mockResolvedValue({ status: "success" }),
+}: {
+  tab?: { id?: number; url?: string };
+  setPopup?: ReturnType<typeof vi.fn>;
+  save?: ReturnType<typeof vi.fn>;
+} = {}) {
+  let onClick: ((tab: { id?: number; url?: string }) => void) | undefined;
+  let onMessage:
+    | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | undefined)
+    | undefined;
+  const browser = {
+    action: {
+      onClicked: { addListener(listener: (nextTab: { id?: number; url?: string }) => void) { onClick = listener; } },
+      setPopup,
+    },
+    tabs: {
+      query: vi.fn().mockResolvedValue([{ id: 99, url: "https://example.test/focused-elsewhere" }]),
+      get: vi.fn().mockResolvedValue(tab),
+    },
+    runtime: {
+      id: "arthur-extension",
+      getURL: vi.fn().mockReturnValue("moz-extension://arthur-extension/status.html"),
+      onMessage: {
+        addListener(
+          listener: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | undefined,
+        ) {
+          onMessage = listener;
+        },
+      },
+    },
+  };
+  createBackgroundController(browser, { save });
+  const dispatch = async (
+    message: unknown = { type: "retry_save", tabId: 31 },
+    sender: unknown = trustedSender,
+  ): Promise<unknown> => {
+    let resolveResponse: ((response: unknown) => void) | undefined;
+    const response = new Promise<unknown>((resolve) => { resolveResponse = resolve; });
+    expect(onMessage?.(message, sender, (value) => resolveResponse?.(value))).toBe(true);
+    return response;
+  };
+  return { browser, dispatch, get onClick() { return onClick; }, get onMessage() { return onMessage; }, save };
+}
 
 describe("createBackgroundController", () => {
   it("saves the active tab once and clears its previous status popup", async () => {
@@ -61,42 +111,94 @@ describe("createBackgroundController", () => {
     release?.();
   });
 
-  it("retries through a background message when the status popup intercepts toolbar clicks", async () => {
-    let onClick: ((tab: { id?: number; url?: string }) => void) | undefined;
-    let onMessage:
-      | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | undefined)
-      | undefined;
-    let popup = "status.html";
-    const browser = {
-      action: {
-        onClicked: { addListener(listener: (tab: { id?: number; url?: string }) => void) { onClick = listener; } },
-        setPopup: vi.fn().mockImplementation(async ({ popup: nextPopup }: { popup: string }) => { popup = nextPopup; }),
-      },
-      tabs: { query: vi.fn().mockResolvedValue([{ id: 31, url: "https://example.test/retry" }]) },
-      runtime: {
-        onMessage: {
-          addListener(
-            listener: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | undefined,
-          ) {
-            onMessage = listener;
-          },
-        },
-      },
-    };
-    const save = vi.fn().mockResolvedValue(undefined);
-    createBackgroundController(browser, { save });
+  it("retries the popup's explicit tab even after browser focus changes", async () => {
+    const harness = retryHarness();
 
-    if (popup === "") onClick?.({ id: 31, url: "https://example.test/retry" });
-    expect(save).not.toHaveBeenCalled();
+    await expect(harness.dispatch()).resolves.toEqual({ ok: true });
+
+    expect(harness.browser.tabs.get).toHaveBeenCalledWith(31);
+    expect(harness.browser.tabs.query).not.toHaveBeenCalled();
+    expect(harness.browser.action.setPopup).toHaveBeenCalledWith({ tabId: 31, popup: "" });
+    expect(harness.save).toHaveBeenCalledWith(31, "https://example.test/retry");
+  });
+
+  it("rejects retry messages from non-status extension contexts and malformed shapes", () => {
+    const harness = retryHarness();
     const sendResponse = vi.fn();
-    expect(onMessage?.({ type: "retry_save" }, {}, sendResponse)).toBe(true);
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
 
-    expect(browser.action.setPopup).toHaveBeenCalledWith({ tabId: 31, popup: "" });
-    expect(save).toHaveBeenCalledWith(31, "https://example.test/retry");
-    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ ok: true }));
+    expect(harness.onMessage?.({ type: "retry_save", tabId: 31 }, {
+      id: "arthur-extension",
+      url: "https://example.test/article",
+    }, sendResponse)).toBeUndefined();
+    expect(harness.onMessage?.({ type: "retry_save", tabId: 31, extra: true }, trustedSender, sendResponse)).toBeUndefined();
+    expect(harness.onMessage?.({ type: "retry_save", tabId: 31 }, {
+      id: "other-extension",
+      url: "moz-extension://arthur-extension/status.html",
+    }, sendResponse)).toBeUndefined();
+    expect(harness.browser.tabs.get).not.toHaveBeenCalled();
+    expect(sendResponse).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["closed tab", { tab: () => Promise.reject(new Error("closed")) }, "tab_unavailable"],
+    ["tab without a URL", { tab: () => Promise.resolve({ id: 31 }) }, "tab_unavailable"],
+    ["popup clearing failure", { setPopup: vi.fn().mockRejectedValue(new Error("popup")) }, "save_failed"],
+    ["coordinator rejection", { save: vi.fn().mockRejectedValue(new Error("save")) }, "save_failed"],
+  ])("responds with a typed failure for %s", async (_name, setup, expectedCode) => {
+    const harness = retryHarness({
+      ...(setup.tab === undefined ? {} : { tab: undefined }),
+      ...(setup.setPopup === undefined ? {} : { setPopup: setup.setPopup }),
+      ...(setup.save === undefined ? {} : { save: setup.save }),
+    });
+    if (setup.tab !== undefined) harness.browser.tabs.get.mockImplementation(setup.tab);
+
+    await expect(harness.dispatch()).resolves.toMatchObject({ ok: false, code: expectedCode });
+  });
+
+  it("responds busy instead of claiming a skipped retry succeeded", async () => {
+    let release: (() => void) | undefined;
+    const save = vi.fn().mockImplementation(() => new Promise((resolve) => { release = () => resolve({ status: "success" }); }));
+    const harness = retryHarness({ save });
+    harness.browser.tabs.query.mockResolvedValue([{ id: 22, url: "https://example.test/first" }]);
+    harness.onClick?.({ id: 22, url: "https://example.test/first" });
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+
+    await expect(harness.dispatch()).resolves.toMatchObject({ ok: false, code: "save_busy" });
+    release?.();
+  });
+});
+
+describe("per-tab status storage", () => {
+  it("writes independent keys for A and B instead of replacing one global record", async () => {
+    const storage = { set: vi.fn().mockResolvedValue(undefined), remove: vi.fn().mockResolvedValue(undefined) };
+    const adapter = createStatusBrowserAdapter({
+      action: { setBadgeText: vi.fn(), setPopup: vi.fn() },
+      storage: { local: storage },
+    });
+    const status = new StatusController(adapter);
+
+    await status.error(41, { code: "tab_a", message: "Status A." });
+    await status.error(42, { code: "tab_b", message: "Status B." });
+
+    expect(storage.set).toHaveBeenNthCalledWith(1, {
+      [statusStorageKey(41)]: { tabId: 41, kind: "error", details: [{ code: "tab_a", message: "Status A." }] },
+    });
+    expect(storage.set).toHaveBeenNthCalledWith(2, {
+      [statusStorageKey(42)]: { tabId: 42, kind: "error", details: [{ code: "tab_b", message: "Status B." }] },
+    });
+  });
+
+  it("removes a tab's status key when that tab closes", async () => {
+    let onRemoved: ((tabId: number) => void) | undefined;
+    const remove = vi.fn().mockResolvedValue(undefined);
+    registerStatusCleanup({
+      tabs: { onRemoved: { addListener(listener: (tabId: number) => void) { onRemoved = listener; } } },
+      storage: { local: { remove } },
+    });
+
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith("status"));
+    onRemoved?.(41);
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith(statusStorageKey(41)));
   });
 });
 

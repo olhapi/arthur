@@ -3,10 +3,17 @@ export interface StatusDetail {
   message: string;
 }
 
+const STATUS_STORAGE_PREFIX = "arthur-status:";
+
+export function statusStorageKey(tabId: number): string {
+  return `${STATUS_STORAGE_PREFIX}${tabId}`;
+}
+
 export interface StatusBrowserAdapter {
   setBadgeText(details: { tabId: number; text: string }): Promise<void> | void;
   setPopup(details: { tabId: number; popup: string }): Promise<void> | void;
   setLocal(value: { tabId: number; kind: "warning" | "error"; details: readonly StatusDetail[] }): Promise<void> | void;
+  clearLocal(tabId: number): Promise<void> | void;
 }
 
 export interface SaveStatus {
@@ -23,11 +30,13 @@ export class StatusController implements SaveStatus {
   async saving(tabId: number): Promise<void> {
     await this.browser.setBadgeText({ tabId, text: "…" });
     await this.browser.setPopup({ tabId, popup: "" });
+    await this.browser.clearLocal(tabId);
   }
 
   async success(tabId: number): Promise<void> {
     await this.browser.setBadgeText({ tabId, text: "✓" });
     await this.browser.setPopup({ tabId, popup: "" });
+    await this.browser.clearLocal(tabId);
   }
 
   async warning(tabId: number, details: readonly StatusDetail[]): Promise<void> {

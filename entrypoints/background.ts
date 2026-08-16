@@ -4,7 +4,11 @@ import { defineBackground } from "wxt/utils/define-background";
 import type { ExtractedArticle } from "../src/article/extract.js";
 import { SaveCoordinator } from "../src/background/save-coordinator.js";
 import { connectNativeClient } from "../src/background/native-client.js";
-import { StatusController } from "../src/background/status.js";
+import {
+  StatusController,
+  statusStorageKey,
+  type StatusBrowserAdapter,
+} from "../src/background/status.js";
 
 export interface ActiveTab {
   id?: number;
@@ -18,18 +22,86 @@ export interface BackgroundBrowserFacade {
   };
   tabs: {
     query(query: { active: boolean; currentWindow: boolean }): Promise<readonly ActiveTab[]>;
+    get(tabId: number): Promise<ActiveTab>;
   };
   runtime: {
+    id: string;
+    getURL(path: string): string;
     onMessage: {
       addListener(
-        listener: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | undefined,
+        listener: (
+          message: unknown,
+          sender: { id?: string; url?: string },
+          sendResponse: (response: unknown) => void,
+        ) => boolean | undefined,
       ): void;
     };
   };
 }
 
 export interface SaveCoordinatorFacade {
-  save(tabId: number, tabUrl: string): Promise<unknown>;
+  save(tabId: number, tabUrl: string): Promise<{ status: "success" | "warning" | "error" } | unknown>;
+}
+
+export type RetrySaveResult =
+  | { ok: true }
+  | { ok: false; code: "save_busy" | "tab_unavailable" | "save_failed"; message: string };
+
+export interface StatusBrowserFacade {
+  action: {
+    setBadgeText(details: { tabId: number; text: string }): Promise<void> | void;
+    setPopup(details: { tabId: number; popup: string }): Promise<void> | void;
+  };
+  storage: {
+    local: {
+      set(values: Record<string, unknown>): Promise<void> | void;
+      remove(key: string): Promise<void> | void;
+    };
+  };
+}
+
+export function createStatusBrowserAdapter(browser: StatusBrowserFacade): StatusBrowserAdapter {
+  return {
+    setBadgeText: (details) => browser.action.setBadgeText(details),
+    setPopup: (details) => browser.action.setPopup(details),
+    setLocal: async (value) => {
+      await browser.storage.local.set({ [statusStorageKey(value.tabId)]: value });
+    },
+    clearLocal: async (tabId) => {
+      await browser.storage.local.remove(statusStorageKey(tabId));
+    },
+  };
+}
+
+export interface StatusCleanupBrowser {
+  tabs: { onRemoved: { addListener(listener: (tabId: number) => void): void } };
+  storage: { local: { remove(key: string): Promise<void> | void } };
+}
+
+export function registerStatusCleanup(browser: StatusCleanupBrowser): void {
+  void Promise.resolve(browser.storage.local.remove("status")).catch(() => undefined);
+  browser.tabs.onRemoved.addListener((tabId) => {
+    void Promise.resolve(browser.storage.local.remove(statusStorageKey(tabId))).catch(() => undefined);
+  });
+}
+
+function isRetrySaveMessage(message: unknown): message is { type: "retry_save"; tabId: number } {
+  if (typeof message !== "object" || message === null) return false;
+  const candidate = message as { type?: unknown; tabId?: unknown };
+  return (
+    Object.keys(message).length === 2 &&
+    candidate.type === "retry_save" &&
+    typeof candidate.tabId === "number" &&
+    Number.isInteger(candidate.tabId) &&
+    candidate.tabId >= 0
+  );
+}
+
+function isTrustedStatusSender(
+  sender: { id?: string; url?: string },
+  runtime: Pick<BackgroundBrowserFacade["runtime"], "id" | "getURL">,
+): boolean {
+  return sender.id === runtime.id && sender.url === runtime.getURL("status.html");
 }
 
 /** Wires toolbar clicks while serializing access to the coordinator's one native client. */
@@ -39,40 +111,67 @@ export function createBackgroundController(
 ): void {
   let saving = false;
 
-  const saveActiveTab = async (clickedTab: ActiveTab = {}): Promise<void> => {
-    const activeTabs = await browser.tabs.query({ active: true, currentWindow: true });
-    const activeTab = activeTabs[0] ?? clickedTab;
-    if (activeTab.id === undefined || activeTab.url === undefined || saving) return;
-
+  const saveTab = async (tab: Required<Pick<ActiveTab, "id" | "url">>): Promise<RetrySaveResult> => {
+    if (saving) {
+      return { ok: false, code: "save_busy", message: "Another article save is already in progress." };
+    }
     saving = true;
     try {
-      await browser.action.setPopup({ tabId: activeTab.id, popup: "" });
-      await coordinator.save(activeTab.id, activeTab.url);
+      await browser.action.setPopup({ tabId: tab.id, popup: "" });
+      const outcome = await coordinator.save(tab.id, tab.url);
+      if (typeof outcome === "object" && outcome !== null && (outcome as { status?: unknown }).status === "error") {
+        return { ok: false, code: "save_failed", message: "The article could not be saved." };
+      }
+      return { ok: true };
+    } catch {
+      return { ok: false, code: "save_failed", message: "The article could not be saved." };
     } finally {
       saving = false;
     }
   };
 
+  const saveActiveTab = async (clickedTab: ActiveTab = {}): Promise<void> => {
+    let activeTab: ActiveTab;
+    try {
+      const activeTabs = await browser.tabs.query({ active: true, currentWindow: true });
+      activeTab = activeTabs[0] ?? clickedTab;
+    } catch {
+      return;
+    }
+    if (activeTab.id === undefined || activeTab.url === undefined) return;
+    await saveTab({ id: activeTab.id, url: activeTab.url });
+  };
+
+  const retryTab = async (tabId: number): Promise<RetrySaveResult> => {
+    if (saving) {
+      return { ok: false, code: "save_busy", message: "Another article save is already in progress." };
+    }
+    let tab: ActiveTab;
+    try {
+      tab = await browser.tabs.get(tabId);
+    } catch {
+      return { ok: false, code: "tab_unavailable", message: "The original tab is no longer available." };
+    }
+    if (tab.id !== tabId || typeof tab.url !== "string" || tab.url === "") {
+      return { ok: false, code: "tab_unavailable", message: "The original tab is no longer available." };
+    }
+    return saveTab({ id: tabId, url: tab.url });
+  };
+
   browser.action.onClicked.addListener((clickedTab) => {
     void saveActiveTab(clickedTab);
   });
-  browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (typeof message !== "object" || message === null || (message as { type?: unknown }).type !== "retry_save") {
+  browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!isRetrySaveMessage(message) || !isTrustedStatusSender(sender, browser.runtime)) {
       return undefined;
     }
-    void saveActiveTab().then(() => sendResponse({ ok: true }));
+    void retryTab(message.tabId).then(sendResponse);
     return true;
   });
 }
 
 function createProductionCoordinator(): SaveCoordinator {
-  const status = new StatusController({
-    setBadgeText: (details) => browser.action.setBadgeText(details),
-    setPopup: (details) => browser.action.setPopup(details),
-    setLocal: async (value) => {
-      await browser.storage.local.set({ status: value });
-    },
-  });
+  const status = new StatusController(createStatusBrowserAdapter(browser as unknown as StatusBrowserFacade));
   return new SaveCoordinator({
     loadSettings: async () => (await browser.storage.local.get("settings")).settings,
     extract: async (tabId): Promise<ExtractedArticle> =>
@@ -84,5 +183,6 @@ function createProductionCoordinator(): SaveCoordinator {
 }
 
 export default defineBackground(() => {
+  registerStatusCleanup(browser as unknown as StatusCleanupBrowser);
   createBackgroundController(browser as unknown as BackgroundBrowserFacade, createProductionCoordinator());
 });

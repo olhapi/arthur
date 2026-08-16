@@ -18,6 +18,10 @@ class FakeStatusBrowser implements StatusBrowserAdapter {
     this.calls.push("local");
     this.details.push(value);
   }
+
+  async clearLocal(tabId: number): Promise<void> {
+    this.calls.push(`clear:${tabId}`);
+  }
 }
 
 describe("StatusController", () => {
@@ -28,7 +32,14 @@ describe("StatusController", () => {
     await status.saving(17);
     await status.success(17);
 
-    expect(browser.calls).toEqual(["badge:17:…", "popup:17:", "badge:17:✓", "popup:17:"]);
+    expect(browser.calls).toEqual([
+      "badge:17:…",
+      "popup:17:",
+      "clear:17",
+      "badge:17:✓",
+      "popup:17:",
+      "clear:17",
+    ]);
     expect(browser.details).toEqual([]);
   });
 

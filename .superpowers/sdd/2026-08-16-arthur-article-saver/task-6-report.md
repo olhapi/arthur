@@ -93,3 +93,31 @@ facades; production uses WXT's unified `browser` API.
   filtered to the active tab before rendering.
 - Host handshake and destination access failures remain distinct typed results.
 - Both light and dark error colors exceed WCAG AA contrast for normal text.
+
+## Review fix round 2
+
+### RED → GREEN evidence
+
+- Retry identity/trust RED proved the popup message did not carry a tab ID,
+  followed browser focus, and accepted content-script/foreign/malformed
+  messages. GREEN requires the exact `{ type: "retry_save", tabId }` shape,
+  validates the sender ID plus exact extension `status.html` URL, and resolves
+  the requested tab through `tabs.get(tabId)`.
+- Retry completion RED proved closed/malformed tabs were reported as success,
+  popup/coordinator rejection left the callback channel hanging, and a busy
+  coordinator reported success without starting work. GREEN returns a typed
+  success or `save_busy`, `tab_unavailable`, or `save_failed` response for every
+  accepted request. The popup keeps its captured tab ID, re-enables Retry save
+  in `finally`, and renders rejected/skipped retries as failures.
+- Status retention RED proved one shared object still discarded tab A when tab
+  B wrote. GREEN stores `arthur-status:<tabId>` records, loads only the active
+  popup tab's exact key, clears stale records when saving succeeds/restarts,
+  and removes a record when its tab closes. Records are therefore bounded to
+  actionable failures for live tabs.
+
+### Verification
+
+- Focused RED suites failed in all reviewed branches before implementation.
+- GREEN `rtk pnpm test -- entrypoints` passes 15 files and 84 tests.
+- Standard typecheck and Chrome, Edge, and Firefox builds pass.
+- Generated manifest assertions and `rtk git diff --check` pass.
