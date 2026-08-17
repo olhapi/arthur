@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { extractArticle } from "./extract.js";
+import { finalizeMarkdown } from "./markdown.js";
 
 const fixturePath = resolve(process.cwd(), "tests/fixtures/article.html");
 
@@ -77,6 +78,24 @@ describe("extractArticle", () => {
       expect.objectContaining({ url: "https://cdn.example.test/rendered/selected.webp" }),
     );
     expect(article.media).not.toContainEqual(expect.objectContaining({ url: "https://example.test/media/fallback.jpg" }));
+  });
+
+  it("unwraps a linked downloadable image into a local attachment embed", () => {
+    const imageId = "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832";
+    const document = new DOMParser().parseFromString(
+      `<!doctype html><html><head><title>Linked image</title></head><body><article>
+        <h1>Linked image</h1>
+        <p>This deliberately substantial paragraph keeps Readability focused on the article and its linked image.</p>
+        <a href="https://substackcdn.example.test/image/fetch/remote-wrapper"><img src="https://media.example.test/hero.jpeg" alt="Hero"></a>
+      </article></body></html>`,
+      "text/html",
+    );
+
+    const article = extractArticle(document, "https://example.test/linked-image", { createMediaId: () => imageId });
+    const finalized = finalizeMarkdown(article.markdown, new Map([[imageId, "hero--abc.jpeg"]]));
+
+    expect(finalized).toContain("![[attachments/hero--abc.jpeg]]");
+    expect(finalized).not.toContain("substackcdn.example.test");
   });
 
   it("removes hidden and tracking-pixel media before extracting resources while retaining icons", () => {
