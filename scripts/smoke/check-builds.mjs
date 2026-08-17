@@ -37,6 +37,8 @@ function validateManifest(manifest, target) {
     if (manifest.key !== CHROMIUM_PUBLIC_KEY_DER_BASE64 || getChromiumExtensionId(manifest.key) !== CHROMIUM_EXTENSION_ID) {
       fail(`${target.name} manifest key does not produce Arthur's fixed Chromium identity.`);
     }
+  } else if (Object.hasOwn(manifest, "key")) {
+    fail(`${target.name} manifest must not contain Chromium's key.`);
   }
   const gecko = manifest.browser_specific_settings?.gecko;
   if (!gecko || gecko.id !== "arthur@olhapi.com") fail(`${target.name} Gecko identity is missing.`);

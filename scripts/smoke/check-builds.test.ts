@@ -48,4 +48,11 @@ describe("check-builds", () => {
     const root = await buildFixture((target, manifest) => { if (target === "edge") manifest.action.default_popup = "popup.html"; });
     await expect(validateBuildArtifacts({ root })).rejects.toThrow(/popup/i);
   });
+
+  it("rejects a Firefox manifest that leaks Chromium's key", async () => {
+    const root = await buildFixture((target, manifest) => {
+      if (target === "firefox") manifest.key = CHROMIUM_PUBLIC_KEY_DER_BASE64;
+    });
+    await expect(validateBuildArtifacts({ root })).rejects.toThrow(/Firefox.*key|key.*Firefox/i);
+  });
 });

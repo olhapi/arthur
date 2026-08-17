@@ -25,8 +25,8 @@ export default defineConfig({
       }
     },
   },
-  manifest: {
-    key: CHROMIUM_PUBLIC_KEY_DER_BASE64,
+  manifest: ({ browser }) => ({
+    ...(browser === "firefox" ? {} : { key: CHROMIUM_PUBLIC_KEY_DER_BASE64 }),
     action: {},
     permissions: ["activeTab", "storage", "nativeMessaging"],
     host_permissions: ["http://*/*", "https://*/*"],
@@ -38,5 +38,5 @@ export default defineConfig({
         },
       },
     },
-  },
+  }),
 });
