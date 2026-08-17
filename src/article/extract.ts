@@ -194,14 +194,14 @@ function replaceMediaWithPlaceholders(document: Document, createMediaId: () => s
     return placeholder;
   };
   const replaceWithPlaceholder = (element: Element, item: ExtractedMedia): void => {
-    const parent = element.parentElement;
+    const link = element.closest("a");
     if (
-      parent?.tagName === "A" &&
-      parent.children.length === 1 &&
-      parent.firstElementChild === element &&
-      (parent.textContent ?? "").trim() === ""
+      link !== null &&
+      link.querySelectorAll("img").length === 1 &&
+      link.querySelector("img") === element &&
+      (link.textContent ?? "").trim() === ""
     ) {
-      parent.replaceWith(placeholderNode(item));
+      link.replaceWith(placeholderNode(item));
       return;
     }
     element.replaceWith(placeholderNode(item));

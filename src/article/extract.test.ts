@@ -86,7 +86,7 @@ describe("extractArticle", () => {
       `<!doctype html><html><head><title>Linked image</title></head><body><article>
         <h1>Linked image</h1>
         <p>This deliberately substantial paragraph keeps Readability focused on the article and its linked image.</p>
-        <a href="https://substackcdn.example.test/image/fetch/remote-wrapper"><img src="https://media.example.test/hero.jpeg" alt="Hero"></a>
+        <a href="https://substackcdn.example.test/image/fetch/remote-wrapper"><figure><img src="https://media.example.test/hero.jpeg" alt="Hero"></figure></a>
       </article></body></html>`,
       "text/html",
     );
