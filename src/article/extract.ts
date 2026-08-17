@@ -146,9 +146,13 @@ function removeTrackingElements(document: Document): void {
       .join(" ")
       .toLowerCase();
     const trackingMarkup = [...element.attributes].some((attribute) => /(?:track|analytics|beacon|pixel)/i.test(attribute.name));
+    const explicitTrackingMarker = [...element.attributes].some((attribute) =>
+      /^(?:data-)?(?:track(?:ing)?|analytics|beacon|pixel)$/i.test(attribute.name) &&
+      /^(?:|1|true|yes)$/i.test(attribute.value.trim()),
+    );
     const tiny = width !== undefined && height !== undefined && width <= 2 && height <= 2;
     const trackingName = /(?:track(?:ing)?|analytics|beacon|pixel)/.test(source);
-    if (isHidden(element) || tiny || (trackingMarkup && trackingName)) element.remove();
+    if (isHidden(element) || tiny || explicitTrackingMarker || (trackingMarkup && trackingName)) element.remove();
   }
 }
 

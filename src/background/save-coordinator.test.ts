@@ -351,6 +351,55 @@ describe("SaveCoordinator", () => {
     expect(cancelled).toBe(true);
   });
 
+  it("cancels retained responses when a later preflight rejects", async () => {
+    const first = directMedia();
+    const second: ExtractedMedia = {
+      ...directMedia(), id: "e0ddc6e9-9075-455f-9af0-2d2fd08dcc6d", url: "https://cdn.example.test/two.webp",
+      placeholder: "arthur-media://e0ddc6e9-9075-455f-9af0-2d2fd08dcc6d",
+    };
+    let cancelled = false;
+    const { coordinator } = createCoordinator({
+      extracted: article({ media: [first, second], markdown: `${first.placeholder} ${second.placeholder}` }),
+      preflight: async (item) => {
+        if (item.id === second.id) throw new Error("later preflight failed");
+        return {
+          status: "eligible",
+          media: item,
+          response: new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } })),
+          contentType: "image/webp",
+          declaredBytes: undefined,
+        };
+      },
+    });
+
+    await expect(coordinator.save(1, "https://example.test/article")).resolves.toMatchObject({ status: "error" });
+    expect(cancelled).toBe(true);
+  });
+
+  it("does not let a never-settling body cancellation delay abort and error status", async () => {
+    const native = new FakeNativeClient();
+    const status = new RecordingStatus();
+    const { coordinator } = createCoordinator({
+      native,
+      status,
+      preflight: async (item) => ({
+        status: "eligible",
+        media: item,
+        response: new Response(new ReadableStream<Uint8Array>({ cancel: () => new Promise<void>(() => {}) })),
+        contentType: "image/webp",
+        declaredBytes: undefined,
+      }),
+      transfer: async () => { throw new Error("transfer stopped"); },
+    });
+
+    await expect(Promise.race([
+      coordinator.save(1, "https://example.test/article"),
+      new Promise((resolve) => setTimeout(() => resolve({ status: "timeout" }), 100)),
+    ])).resolves.toMatchObject({ status: "error" });
+    expect(native.calls).toContain("abort_save");
+    expect(status.calls).toEqual(["saving", "error"]);
+  });
+
   it.each([
     ["begin failure", (native: FakeNativeClient) => { native.beginSaveError = new NativeHostError("begin_failed", "No session."); }, undefined],
     ["mid-transfer failure", undefined, async () => { throw new Error("transfer stopped"); }],

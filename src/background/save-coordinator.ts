@@ -81,19 +81,19 @@ function toWarning(item: Extract<PreparedMedia, { status: "fallback" }>): SaveWa
   return { code: item.code, message: item.message };
 }
 
-async function discardPreparedResponse(prepared: Extract<PreparedMedia, { status: "eligible" }>): Promise<void> {
+function discardPreparedResponse(prepared: Extract<PreparedMedia, { status: "eligible" }>): void {
   try {
-    await prepared.response.body?.cancel();
+    void prepared.response.body?.cancel().catch(() => undefined);
   } catch {
     // The coordinator has already selected the remote-link fallback. A body
     // cancellation failure must not discard the otherwise valid article save.
   }
 }
 
-async function discardEligibleResponses(prepared: readonly PreparedMedia[]): Promise<void> {
-  await Promise.all(prepared.map(async (item) => {
-    if (item.status === "eligible") await discardPreparedResponse(item);
-  }));
+function discardEligibleResponses(prepared: readonly PreparedMedia[]): void {
+  for (const item of prepared) {
+    if (item.status === "eligible") discardPreparedResponse(item);
+  }
 }
 
 function eligibleTransferOrder(prepared: readonly PreparedMedia[]): Extract<PreparedMedia, { status: "eligible" }>[] {
@@ -197,7 +197,7 @@ export class SaveCoordinator {
       // A failed begin, transfer, abort, or commit can leave later preflight
       // bodies untouched. Release all eligible bodies; cancel is harmless after
       // a completed transfer and prevents retained browser downloads otherwise.
-      await discardEligibleResponses(prepared);
+      discardEligibleResponses(prepared);
       if (sessionActive) {
         try {
           await client?.abortSave("The save could not be completed.");
@@ -224,33 +224,38 @@ export class SaveCoordinator {
   private async preflightAll(media: readonly ExtractedMedia[]): Promise<PreparedMedia[]> {
     const prepared: PreparedMedia[] = [];
     let declaredTotal = 0;
-    for (const item of media.slice(0, MAX_MEDIA_PER_SAVE)) {
-      const next = await this.preflight(item, this.dependencies.fetcher);
-      if (
-        next.status === "eligible" &&
-        next.declaredBytes !== undefined &&
-        declaredTotal + next.declaredBytes > MEDIA_LIMITS.total
-      ) {
-        await discardPreparedResponse(next);
+    try {
+      for (const item of media.slice(0, MAX_MEDIA_PER_SAVE)) {
+        const next = await this.preflight(item, this.dependencies.fetcher);
+        if (
+          next.status === "eligible" &&
+          next.declaredBytes !== undefined &&
+          declaredTotal + next.declaredBytes > MEDIA_LIMITS.total
+        ) {
+          discardPreparedResponse(next);
+          prepared.push({
+            status: "fallback",
+            media: next.media,
+            code: "media_limit_exceeded",
+            message: "The save exceeds its configured total media limit.",
+          });
+          continue;
+        }
+        if (next.status === "eligible" && next.declaredBytes !== undefined) declaredTotal += next.declaredBytes;
+        prepared.push(next);
+      }
+      for (const item of media.slice(MAX_MEDIA_PER_SAVE)) {
         prepared.push({
           status: "fallback",
-          media: next.media,
-          code: "media_limit_exceeded",
-          message: "The save exceeds its configured total media limit.",
+          media: item,
+          code: "media_item_limit_exceeded",
+          message: "The save supports at most 4096 media items.",
         });
-        continue;
       }
-      if (next.status === "eligible" && next.declaredBytes !== undefined) declaredTotal += next.declaredBytes;
-      prepared.push(next);
+      return prepared;
+    } catch (error) {
+      discardEligibleResponses(prepared);
+      throw error;
     }
-    for (const item of media.slice(MAX_MEDIA_PER_SAVE)) {
-      prepared.push({
-        status: "fallback",
-        media: item,
-        code: "media_item_limit_exceeded",
-        message: "The save supports at most 4096 media items.",
-      });
-    }
-    return prepared;
   }
 }
