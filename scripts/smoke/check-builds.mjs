@@ -12,12 +12,27 @@ const TARGETS = [
 ];
 const REQUIRED_PERMISSIONS = ["activeTab", "storage", "nativeMessaging"];
 const MATCHES = ["http://*/*", "https://*/*"];
+const ICONS = {
+  16: "icons/arthur-16.png",
+  32: "icons/arthur-32.png",
+  48: "icons/arthur-48.png",
+  128: "icons/arthur-128.png",
+};
 
 function fail(message) { throw new Error(message); }
 
 function exactArray(actual, expected, label) {
   if (!Array.isArray(actual) || actual.length !== expected.length || actual.some((value, index) => value !== expected[index])) {
     fail(`${label} is not the expected exact array.`);
+  }
+}
+
+function exactIcons(actual, label) {
+  if (actual === null || typeof actual !== "object" || Object.keys(actual).length !== Object.keys(ICONS).length) {
+    fail(`${label} is not the expected exact icon map.`);
+  }
+  for (const [size, file] of Object.entries(ICONS)) {
+    if (actual[size] !== file) fail(`${label} is not the expected exact icon map.`);
   }
 }
 
@@ -42,6 +57,7 @@ function validateManifest(manifest, target) {
   }
   const gecko = manifest.browser_specific_settings?.gecko;
   if (!gecko || gecko.id !== "arthur@olhapi.com") fail(`${target.name} Gecko identity is missing.`);
+  exactIcons(manifest.icons, `${target.name} extension icons`);
   if (manifest.options_ui?.page !== "options.html" || manifest.options_ui?.open_in_tab !== false) fail(`${target.name} options page is invalid.`);
   if (!Array.isArray(manifest.content_scripts) || manifest.content_scripts.length !== 1) fail(`${target.name} content script is missing.`);
   const content = manifest.content_scripts[0];
@@ -50,9 +66,11 @@ function validateManifest(manifest, target) {
   if (target.manifestVersion === 3) {
     if (manifest.background?.service_worker !== "background.js") fail(`${target.name} service worker is invalid.`);
     if (!manifest.action || Object.hasOwn(manifest.action, "default_popup")) fail(`${target.name} must not declare a default action popup.`);
+    exactIcons(manifest.action.default_icon, `${target.name} toolbar icons`);
   } else {
     exactArray(manifest.background?.scripts, ["background.js"], `${target.name} background scripts`);
     if (!manifest.browser_action || Object.hasOwn(manifest.browser_action, "default_popup")) fail(`${target.name} must not declare a default browser-action popup.`);
+    exactIcons(manifest.browser_action.default_icon, `${target.name} toolbar icons`);
   }
 }
 
@@ -68,6 +86,7 @@ export async function validateBuildArtifacts({ root = path.join(ROOT, ".output")
       assertFile(artifact, "content-scripts/content.js", `${target.name} content-script entrypoint`),
       assertFile(artifact, "options.html", `${target.name} options page`),
       assertFile(artifact, "status.html", `${target.name} status page`),
+      ...Object.values(ICONS).map((file) => assertFile(artifact, file, `${target.name} icon ${file}`)),
     ]);
     targets.push(target.name);
   }

@@ -6,6 +6,13 @@ import { describe, expect, it } from "vitest";
 import { CHROMIUM_PUBLIC_KEY_DER_BASE64 } from "../native-host/identity.mjs";
 import { validateBuildArtifacts } from "./check-builds.mjs";
 
+const ICONS = {
+  16: "icons/arthur-16.png",
+  32: "icons/arthur-32.png",
+  48: "icons/arthur-48.png",
+  128: "icons/arthur-128.png",
+};
+
 async function buildFixture(mutator?: (target: string, manifest: Record<string, any>) => void) {
   const root = await mkdtemp(path.join(tmpdir(), "arthur-build-smoke-"));
   for (const target of [
@@ -26,12 +33,13 @@ async function buildFixture(mutator?: (target: string, manifest: Record<string, 
       options_ui: { page: "options.html", open_in_tab: false },
       content_scripts: [{ matches: ["http://*/*", "https://*/*"], js: ["content-scripts/content.js"] }],
       ...(target.manifestVersion === 3
-        ? { key: CHROMIUM_PUBLIC_KEY_DER_BASE64, host_permissions: ["http://*/*", "https://*/*"], background: { service_worker: "background.js" }, action: {} }
-        : { background: { scripts: ["background.js"] }, browser_action: {} }),
+        ? { key: CHROMIUM_PUBLIC_KEY_DER_BASE64, host_permissions: ["http://*/*", "https://*/*"], background: { service_worker: "background.js" }, action: { default_icon: ICONS }, icons: ICONS }
+        : { background: { scripts: ["background.js"] }, browser_action: { default_icon: ICONS }, icons: ICONS }),
     };
     mutator?.(target.name, manifest);
     await writeFile(path.join(artifact, "manifest.json"), JSON.stringify(manifest));
-    for (const relative of ["background.js", "content-scripts/content.js", "options.html", "status.html"]) {
+    for (const relative of ["background.js", "content-scripts/content.js", "options.html", "status.html", ...Object.values(ICONS)]) {
+      await mkdir(path.dirname(path.join(artifact, relative)), { recursive: true });
       await writeFile(path.join(artifact, relative), "fixture");
     }
   }
@@ -54,5 +62,12 @@ describe("check-builds", () => {
       if (target === "firefox") manifest.key = CHROMIUM_PUBLIC_KEY_DER_BASE64;
     });
     await expect(validateBuildArtifacts({ root })).rejects.toThrow(/Firefox.*key|key.*Firefox/i);
+  });
+
+  it("rejects a manifest without the Arthur toolbar icon mapping", async () => {
+    const root = await buildFixture((target, manifest) => {
+      if (target === "firefox") delete manifest.browser_action.default_icon;
+    });
+    await expect(validateBuildArtifacts({ root })).rejects.toThrow(/icon/i);
   });
 });

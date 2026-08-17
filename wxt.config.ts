@@ -2,6 +2,13 @@ import { defineConfig } from "wxt";
 
 import { CHROMIUM_PUBLIC_KEY_DER_BASE64 } from "./scripts/native-host/identity.mjs";
 
+const ICONS = {
+  16: "icons/arthur-16.png",
+  32: "icons/arthur-32.png",
+  48: "icons/arthur-48.png",
+  128: "icons/arthur-128.png",
+};
+
 export default defineConfig({
   zip: {
     excludeSources: [
@@ -27,7 +34,8 @@ export default defineConfig({
   },
   manifest: ({ browser }) => ({
     ...(browser === "firefox" ? {} : { key: CHROMIUM_PUBLIC_KEY_DER_BASE64 }),
-    action: {},
+    icons: ICONS,
+    action: { default_icon: ICONS },
     permissions: ["activeTab", "storage", "nativeMessaging"],
     host_permissions: ["http://*/*", "https://*/*"],
     browser_specific_settings: {
