@@ -193,6 +193,10 @@ export class NativeClient {
     return this.session?.id;
   }
 
+  get isTerminal(): boolean {
+    return this.closed;
+  }
+
   get terminalSignal(): AbortSignal {
     return this.terminalController.signal;
   }
@@ -430,7 +434,7 @@ export class NativeClient {
       ) {
         this.pendingChunk = undefined;
         pending.resolve(response);
-      } else if (this.hasActiveSession()) {
+      } else if (this.hasActiveSession() || this.hasPendingRequests()) {
         this.terminate(new NativeProtocolError("The native host returned an unexpected chunk acknowledgement."));
       }
       return;
@@ -441,7 +445,7 @@ export class NativeClient {
         const pending = this.pendingRequests.get(response.requestId);
         if (pending !== undefined && errorMatchesRequest(response, pending.request)) {
           this.rejectRequest(response.requestId, error);
-        } else if (this.hasActiveSession()) {
+        } else if (this.hasActiveSession() || this.hasPendingRequests()) {
           this.terminate(new NativeProtocolError("The native host returned an uncorrelated error."));
         }
         return;
@@ -450,13 +454,13 @@ export class NativeClient {
       if (pending !== undefined && response.sessionId === pending.sessionId) {
         this.pendingChunk = undefined;
         pending.reject(error);
-      } else if (this.hasActiveSession()) {
+      } else if (this.hasActiveSession() || this.hasPendingRequests()) {
         this.terminate(new NativeProtocolError("The native host returned an uncorrelated error."));
       }
       return;
     }
     if (response.requestId === undefined) {
-      if (this.hasActiveSession()) {
+      if (this.hasActiveSession() || this.hasPendingRequests()) {
         this.terminate(new NativeProtocolError("The native host returned an uncorrelated response."));
       }
       return;
@@ -464,7 +468,7 @@ export class NativeClient {
     const pending = this.pendingRequests.get(response.requestId);
     if (pending !== undefined && responseMatchesRequest(response, pending.request)) {
       this.resolveRequest(response.requestId, response);
-    } else if (this.hasActiveSession()) {
+    } else if (this.hasActiveSession() || this.hasPendingRequests()) {
       this.terminate(new NativeProtocolError("The native host returned an unexpected correlated response."));
     }
   }
@@ -480,6 +484,10 @@ export class NativeClient {
 
   private hasActiveSession(): boolean {
     return this.beginning || this.session !== undefined;
+  }
+
+  private hasPendingRequests(): boolean {
+    return this.pendingRequests.size !== 0;
   }
 
   private terminate(error: Error): void {

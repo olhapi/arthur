@@ -79,6 +79,22 @@ describe("extractArticle", () => {
     expect(article.media).not.toContainEqual(expect.objectContaining({ url: "https://example.test/media/fallback.jpg" }));
   });
 
+  it("removes hidden and tracking-pixel media before extracting resources while retaining icons", () => {
+    const document = new DOMParser().parseFromString(
+      `<!doctype html><html><head><title>Tracked article</title></head><body><article>
+        <h1>Tracked article</h1><p>This deliberately substantial article paragraph keeps Readability focused on this visible content rather than surrounding page chrome.</p>
+        <img src="https://cdn.example.test/pixel.gif" width="1" height="1" data-tracking-id="a">
+        <img src="https://cdn.example.test/hidden.webp" style="display: none">
+        <img src="https://cdn.example.test/icon.svg" width="16" height="16" class="icon" alt="Icon">
+      </article></body></html>`, "text/html",
+    );
+
+    const article = extractArticle(document, "https://example.test/tracked");
+    expect(article.media.map((item) => item.url)).toContain("https://cdn.example.test/icon.svg");
+    expect(article.media.map((item) => item.url)).not.toContain("https://cdn.example.test/pixel.gif");
+    expect(article.media.map((item) => item.url)).not.toContain("https://cdn.example.test/hidden.webp");
+  });
+
   it("preserves Markdown structures that Readability retains", () => {
     const article = extractArticle(fixtureDocument(), "https://example.test/articles/media?edition=1");
 

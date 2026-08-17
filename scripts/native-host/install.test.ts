@@ -80,6 +80,56 @@ describe("native-host installation plan", () => {
     for (const manifest of plan.manifests) expect(JSON.parse(await readFile(manifest.destination, "utf8"))).toEqual(manifest.contents);
   });
 
+  it("fsyncs each destination directory after its staged file is renamed", async () => {
+    const options = await fixture();
+    const plan = await buildInstallPlan({ ...options, platform: "darwin" });
+    const parents = new Set([
+      path.dirname(plan.payloads[0]!.destination),
+      ...plan.manifests.map((manifest) => path.dirname(manifest.destination)),
+    ]);
+    const synced: string[] = [];
+    await applyInstallPlan(plan, {
+      home: options.home,
+      platform: "darwin",
+      fs: {
+        ...nodeFs,
+        open: async (...args: Parameters<typeof nodeFs.open>) => {
+          const handle = await nodeFs.open(...args);
+          if (!parents.has(String(args[0]))) return handle;
+          return new Proxy(handle, { get(target, property) {
+            if (property === "sync") return async () => { synced.push(String(args[0])); return target.sync(); };
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          } });
+        },
+      },
+    });
+    expect(synced.sort()).toEqual([...parents].sort());
+  });
+
+  it("reports a parent-directory fsync failure after the rename instead of claiming installation success", async () => {
+    const options = await fixture();
+    const plan = await buildInstallPlan({ ...options, platform: "darwin" });
+    const parent = path.dirname(plan.payloads[0]!.destination);
+    await expect(applyInstallPlan(plan, {
+      home: options.home,
+      platform: "darwin",
+      fs: {
+        ...nodeFs,
+        open: async (...args: Parameters<typeof nodeFs.open>) => {
+          const handle = await nodeFs.open(...args);
+          if (String(args[0]) !== parent) return handle;
+          return new Proxy(handle, { get(target, property) {
+            if (property === "sync") return async () => { throw new Error("parent fsync failed"); };
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          } });
+        },
+      },
+    })).rejects.toThrow(/parent fsync failed/i);
+    await expect(readFile(plan.payloads[0]!.destination, "utf8")).resolves.toBe("native-host");
+  });
+
   it("refuses a forged plan whose final path escapes the exact allowlist", async () => {
     const options = await fixture();
     const plan = await buildInstallPlan({ ...options, platform: "darwin" });

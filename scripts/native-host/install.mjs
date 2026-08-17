@@ -148,6 +148,17 @@ async function removeOwnedStaging(fs, home, staging) {
   } catch { /* best-effort cleanup only for the unique owned staging path */ }
 }
 
+async function syncDirectory(fs, directory) {
+  const handle = await fs.open(directory, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isDirectory()) throw new Error("Native-host destination parent must be a real directory.");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 async function atomicWrite(fs, home, destination, bytes, mode, label) {
   const parent = path.dirname(destination);
   await validateDirectoryChain(fs, home, parent, { create: true });
@@ -173,6 +184,7 @@ async function atomicWrite(fs, home, destination, bytes, mode, label) {
     await validateDirectoryChain(fs, home, parent);
     await assertRegularNonSymlink(fs, destination, label);
     await fs.rename(staging, destination);
+    await syncDirectory(fs, parent);
   } catch (error) {
     await removeOwnedStaging(fs, home, staging);
     throw error;

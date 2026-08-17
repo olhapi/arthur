@@ -20,6 +20,8 @@ export type PreparedMedia =
 const STREAM_CONTENT_TYPES = new Set([
   "application/vnd.apple.mpegurl",
   "application/x-mpegurl",
+  "audio/mpegurl",
+  "audio/x-mpegurl",
   "application/dash+xml",
 ]);
 const FALLBACK_CHUNK_COUNT = Number.MAX_SAFE_INTEGER;

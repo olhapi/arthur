@@ -164,16 +164,19 @@ export function createBackgroundController(
     }
   };
 
-  const saveActiveTab = async (clickedTab: ActiveTab = {}): Promise<void> => {
-    let activeTab: ActiveTab;
-    try {
-      const activeTabs = await browser.tabs.query({ active: true, currentWindow: true });
-      activeTab = activeTabs[0] ?? clickedTab;
-    } catch {
-      return;
+  const saveActiveTab = async (clickedTab: ActiveTab | undefined): Promise<void> => {
+    // The action callback is the browser's authoritative click identity. A
+    // later active-tab query can race focus changes and save a different page.
+    let tab = clickedTab;
+    if (tab === undefined) {
+      try {
+        [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+      } catch {
+        return;
+      }
     }
-    if (activeTab.id === undefined || activeTab.url === undefined) return;
-    await saveTab({ id: activeTab.id, url: activeTab.url });
+    if (tab?.id === undefined || tab.url === undefined) return;
+    await saveTab({ id: tab.id, url: tab.url });
   };
 
   const retryTab = async (tabId: number): Promise<RetrySaveResult> => {
@@ -212,7 +215,9 @@ function createProductionCoordinator(): SaveCoordinator {
     extract: async (tabId): Promise<ExtractedArticle> =>
       (await browser.tabs.sendMessage(tabId, { type: "extract_article" })) as ExtractedArticle,
     fetcher: fetch,
-    nativeClient: connectNativeClient((hostName) => browser.runtime.connectNative(hostName)),
+    // SaveCoordinator owns one client per live native connection and asks this
+    // factory for a replacement only after a terminal disconnect.
+    nativeClient: () => connectNativeClient((hostName) => browser.runtime.connectNative(hostName)),
     status,
   });
 }

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ExtractedArticle, ExtractedMedia } from "../article/extract.js";
 import { MEDIA_LIMITS } from "../shared/constants.js";
-import { NativeHostError, NativeLimitError, type NativeClient } from "./native-client.js";
+import { NativeClient, NativeDisconnectedError, NativeHostError, NativeLimitError, type NativePortAdapter } from "./native-client.js";
 import type { PreparedMedia } from "./media-transfer.js";
 import { SaveCoordinator } from "./save-coordinator.js";
 import type { SaveStatus } from "./status.js";
@@ -33,19 +33,54 @@ class RecordingStatus implements SaveStatus {
   }
 }
 
+class ResponsiveNativePort implements NativePortAdapter {
+  private readonly messages: Array<(message: unknown) => void> = [];
+  private readonly disconnects: Array<() => void> = [];
+
+  constructor(private readonly disconnectOnHello = false) {}
+
+  readonly onMessage = { addListener: (listener: (message: unknown) => void) => { this.messages.push(listener); } };
+  readonly onDisconnect = { addListener: (listener: () => void) => { this.disconnects.push(listener); } };
+
+  postMessage(message: unknown): void {
+    const request = message as { type: string; requestId?: string; sessionId?: string };
+    queueMicrotask(() => {
+      if (request.type === "hello" && this.disconnectOnHello) {
+        for (const listener of this.disconnects) listener();
+        return;
+      }
+      const response = request.type === "hello"
+        ? { type: "hello_result", requestId: request.requestId, protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" }
+        : request.type === "commit_save"
+          ? { type: "save_result", requestId: request.requestId, sessionId: request.sessionId, savedPath: "/Vault/Clippings/Article.md" }
+          : { type: "ack", requestId: request.requestId, sessionId: request.sessionId };
+      for (const listener of this.messages) listener(response);
+    });
+  }
+
+  disconnect(): void {
+    for (const listener of this.disconnects) listener();
+  }
+}
+
 class FakeNativeClient {
   readonly calls: string[] = [];
   readonly terminalSignal = new AbortController().signal;
   beginMarkdown: string | undefined;
   sessionId: string | undefined;
   helloError: Error | undefined;
+  beginSaveError: Error | undefined;
   beginMediaError: Error | undefined;
   chunkError: Error | undefined;
   commitError: Error | undefined;
+  isTerminal = false;
 
   async hello(): Promise<{ type: "hello_result"; requestId: string; protocolVersion: 1; hostName: string; hostVersion: string }> {
     this.calls.push("hello");
-    if (this.helloError !== undefined) throw this.helloError;
+    if (this.helloError !== undefined) {
+      this.isTerminal = this.helloError instanceof NativeDisconnectedError;
+      throw this.helloError;
+    }
     return { type: "hello_result", requestId: "hello", protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" };
   }
 
@@ -53,6 +88,7 @@ class FakeNativeClient {
     this.calls.push("begin_save");
     this.beginMarkdown = input.markdown;
     this.sessionId = input.sessionId;
+    if (this.beginSaveError !== undefined) throw this.beginSaveError;
   }
 
   async beginMedia(): Promise<void> {
@@ -184,6 +220,49 @@ describe("SaveCoordinator", () => {
     });
   });
 
+  it("retires a disconnected client and lazily creates a new client for the next serialized save", async () => {
+    const disconnected = new FakeNativeClient();
+    disconnected.helloError = new NativeDisconnectedError();
+    const replacement = new FakeNativeClient();
+    const created: FakeNativeClient[] = [];
+    const coordinator = new SaveCoordinator({
+      loadSettings: async () => ({ destination: "/Vault/Clippings" }),
+      extract: async () => article({ media: [] }),
+      fetcher: fetch,
+      nativeClient: (() => {
+        const next = created.length === 0 ? disconnected : replacement;
+        created.push(next);
+        return next;
+      }) as never,
+      status: new RecordingStatus(),
+      createSessionId: () => SESSION_ID,
+    });
+
+    await expect(coordinator.save(1, "https://example.test/article")).resolves.toMatchObject({
+      status: "error", code: "native_disconnected",
+    });
+    await expect(coordinator.save(1, "https://example.test/article")).resolves.toMatchObject({ status: "success" });
+    expect(created).toEqual([disconnected, replacement]);
+    expect(disconnected.calls).toEqual(["hello"]);
+    expect(replacement.calls).toEqual(["hello", "begin_save", "commit_save"]);
+  });
+
+  it("reconnects a real NativeClient port after a terminal disconnect without a background restart", async () => {
+    const ports = [new ResponsiveNativePort(true), new ResponsiveNativePort()];
+    const coordinator = new SaveCoordinator({
+      loadSettings: async () => ({ destination: "/Vault/Clippings" }),
+      extract: async () => article({ media: [] }),
+      fetcher: fetch,
+      nativeClient: () => new NativeClient(ports.shift()!, { createRequestId: () => crypto.randomUUID() }),
+      status: new RecordingStatus(),
+      createSessionId: () => SESSION_ID,
+    });
+
+    await expect(coordinator.save(1, "https://example.test/article")).resolves.toMatchObject({ status: "error", code: "native_disconnected" });
+    await expect(coordinator.save(1, "https://example.test/article")).resolves.toMatchObject({ status: "success" });
+    expect(ports).toEqual([]);
+  });
+
   it("streams each deduplicated direct resource then commits a full success", async () => {
     const media = directMedia();
     let fetches = 0;
@@ -270,6 +349,53 @@ describe("SaveCoordinator", () => {
     expect(native.beginMarkdown).toBe(`${first.placeholder} <https://cdn.example.test/second.webp>`);
     expect(native.calls.filter((call) => call === "begin_media")).toHaveLength(1);
     expect(cancelled).toBe(true);
+  });
+
+  it.each([
+    ["begin failure", (native: FakeNativeClient) => { native.beginSaveError = new NativeHostError("begin_failed", "No session."); }, undefined],
+    ["mid-transfer failure", undefined, async () => { throw new Error("transfer stopped"); }],
+    ["commit failure", (native: FakeNativeClient) => { native.commitError = new NativeHostError("commit_failed", "No commit."); }, async () => "saved" as const],
+  ] as const)("cancels every unread eligible response after a %s", async (_name, configure, transfer) => {
+    const native = new FakeNativeClient();
+    configure?.(native);
+    const first = directMedia();
+    const second: ExtractedMedia = {
+      ...directMedia(), id: "e0ddc6e9-9075-455f-9af0-2d2fd08dcc6d", url: "https://cdn.example.test/two.webp",
+      placeholder: "arthur-media://e0ddc6e9-9075-455f-9af0-2d2fd08dcc6d",
+    };
+    const cancelled: string[] = [];
+    const { coordinator } = createCoordinator({
+      native,
+      extracted: article({ media: [first, second], markdown: `${first.placeholder} ${second.placeholder}` }),
+      preflight: async (item) => ({
+        status: "eligible",
+        media: item,
+        response: new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled.push(item.id); } })),
+        contentType: "image/webp",
+        declaredBytes: undefined,
+      }),
+      ...(transfer === undefined ? {} : { transfer }),
+    });
+
+    await expect(coordinator.save(1, "https://example.test/article")).resolves.toMatchObject({ status: "error" });
+    expect(cancelled.sort()).toEqual([first.id, second.id].sort());
+  });
+
+  it("does not preflight more than 4096 media items", async () => {
+    const media = Array.from({ length: 4097 }, (_, index) => ({
+      ...directMedia(), id: `media-${index}`, url: `https://cdn.example.test/${index}.webp`, placeholder: `arthur-media://media-${index}`,
+    }));
+    let preflightCalls = 0;
+    const { coordinator } = createCoordinator({
+      extracted: article({ media, markdown: media.map((item) => item.placeholder).join(" ") }),
+      preflight: async (item) => {
+        preflightCalls += 1;
+        return { status: "fallback", media: item, code: "test", message: "test" };
+      },
+    });
+
+    await coordinator.save(1, "https://example.test/article");
+    expect(preflightCalls).toBe(4096);
   });
 
   it("streams declared-size media before unknown-length media can exhaust the total budget", async () => {

@@ -30,7 +30,7 @@ export interface SaveCoordinatorDependencies {
   loadSettings: () => Promise<unknown>;
   extract: (tabId: number, tabUrl: string) => Promise<ExtractedArticle>;
   fetcher: typeof fetch;
-  nativeClient: NativeClient;
+  nativeClient: NativeClient | (() => NativeClient);
   status: SaveStatus;
   createSessionId?: () => string;
   preflight?: (media: ExtractedMedia, fetcher: typeof fetch) => Promise<PreparedMedia>;
@@ -46,6 +46,8 @@ class CoordinatorError extends Error {
     this.name = "CoordinatorError";
   }
 }
+
+const MAX_MEDIA_PER_SAVE = 4_096;
 
 function uniqueMedia(media: readonly ExtractedMedia[]): ExtractedMedia[] {
   const seen = new Set<string>();
@@ -88,6 +90,12 @@ async function discardPreparedResponse(prepared: Extract<PreparedMedia, { status
   }
 }
 
+async function discardEligibleResponses(prepared: readonly PreparedMedia[]): Promise<void> {
+  await Promise.all(prepared.map(async (item) => {
+    if (item.status === "eligible") await discardPreparedResponse(item);
+  }));
+}
+
 function eligibleTransferOrder(prepared: readonly PreparedMedia[]): Extract<PreparedMedia, { status: "eligible" }>[] {
   return prepared
     .filter((item): item is Extract<PreparedMedia, { status: "eligible" }> => item.status === "eligible")
@@ -109,16 +117,27 @@ export class SaveCoordinator {
   private readonly createSessionId: () => string;
   private readonly preflight: (media: ExtractedMedia, fetcher: typeof fetch) => Promise<PreparedMedia>;
   private readonly transfer: (prepared: PreparedMedia, client: NativeClient) => Promise<"saved" | "fallback">;
+  private readonly createNativeClient: () => NativeClient;
+  private nativeClient: NativeClient | undefined;
 
   constructor(private readonly dependencies: SaveCoordinatorDependencies) {
     this.createSessionId = dependencies.createSessionId ?? (() => crypto.randomUUID());
     this.preflight = dependencies.preflight ?? preflightMedia;
     this.transfer = dependencies.transfer ?? transferMedia;
+    if (typeof dependencies.nativeClient === "function") {
+      this.createNativeClient = dependencies.nativeClient;
+    } else {
+      const nativeClient = dependencies.nativeClient;
+      this.nativeClient = nativeClient;
+      this.createNativeClient = () => nativeClient;
+    }
   }
 
   async save(tabId: number, tabUrl: string): Promise<SaveOutcome> {
     await this.dependencies.status.saving(tabId);
     let sessionActive = false;
+    let client: NativeClient | undefined;
+    let prepared: PreparedMedia[] = [];
     try {
       const settings = ArthurSettingsSchema.safeParse(await this.dependencies.loadSettings());
       if (!settings.success) {
@@ -132,14 +151,15 @@ export class SaveCoordinator {
         throw new CoordinatorError("extraction_failed", "The current page could not be extracted as an article.");
       }
 
-      await this.dependencies.nativeClient.hello();
-      const prepared = await this.preflightAll(uniqueMedia(article.media));
+      client = this.getNativeClient();
+      await client.hello();
+      prepared = await this.preflightAll(uniqueMedia(article.media));
       const markdown = rewritePreflightFallbacks(article.markdown, prepared);
       const warnings: SaveWarning[] = prepared
         .filter((item): item is Extract<PreparedMedia, { status: "fallback" }> => item.status === "fallback")
         .map(toWarning);
 
-      await this.dependencies.nativeClient.beginSave({
+      await client.beginSave({
         sessionId: this.createSessionId(),
         destination: settings.data.destination,
         source: article.source,
@@ -153,7 +173,7 @@ export class SaveCoordinator {
       // which maps to the recoverable Vault fallback rather than a fatal
       // pre-begin error for a later known item.
       for (const item of eligibleTransferOrder(prepared)) {
-        const result = await this.transfer(item, this.dependencies.nativeClient);
+        const result = await this.transfer(item, client);
         if (result === "fallback") {
           warnings.push({
             code: "media_fallback",
@@ -166,7 +186,7 @@ export class SaveCoordinator {
       // an abort after a commit failure, because that would be a second,
       // misleading session-not-found request rather than recovery work.
       sessionActive = false;
-      const articlePath = await this.dependencies.nativeClient.commitSave();
+      const articlePath = await client.commitSave();
       if (warnings.length === 0) {
         await this.dependencies.status.success(tabId);
         return { status: "success", articlePath, warnings };
@@ -174,9 +194,13 @@ export class SaveCoordinator {
       await this.dependencies.status.warning(tabId, warnings);
       return { status: "warning", articlePath, warnings };
     } catch (error) {
+      // A failed begin, transfer, abort, or commit can leave later preflight
+      // bodies untouched. Release all eligible bodies; cancel is harmless after
+      // a completed transfer and prevents retained browser downloads otherwise.
+      await discardEligibleResponses(prepared);
       if (sessionActive) {
         try {
-          await this.dependencies.nativeClient.abortSave("The save could not be completed.");
+          await client?.abortSave("The save could not be completed.");
         } catch {
           // The original failure remains the actionable result. The host also
           // cleans staged state on disconnect, so an abort failure is not
@@ -184,15 +208,23 @@ export class SaveCoordinator {
         }
       }
       const failure = toFailure(error);
+      if (client?.isTerminal) this.nativeClient = undefined;
       await this.dependencies.status.error(tabId, failure);
       return { status: "error", ...failure, warnings: [] };
     }
   }
 
+  private getNativeClient(): NativeClient {
+    if (this.nativeClient === undefined || this.nativeClient.isTerminal) {
+      this.nativeClient = this.createNativeClient();
+    }
+    return this.nativeClient;
+  }
+
   private async preflightAll(media: readonly ExtractedMedia[]): Promise<PreparedMedia[]> {
     const prepared: PreparedMedia[] = [];
     let declaredTotal = 0;
-    for (const item of media) {
+    for (const item of media.slice(0, MAX_MEDIA_PER_SAVE)) {
       const next = await this.preflight(item, this.dependencies.fetcher);
       if (
         next.status === "eligible" &&
@@ -210,6 +242,14 @@ export class SaveCoordinator {
       }
       if (next.status === "eligible" && next.declaredBytes !== undefined) declaredTotal += next.declaredBytes;
       prepared.push(next);
+    }
+    for (const item of media.slice(MAX_MEDIA_PER_SAVE)) {
+      prepared.push({
+        status: "fallback",
+        media: item,
+        code: "media_item_limit_exceeded",
+        message: "The save supports at most 4096 media items.",
+      });
     }
     return prepared;
   }

@@ -44,6 +44,8 @@ export function classifyMedia(
     STREAM_EXTENSIONS.has(extension) ||
     normalizedContentType === "application/vnd.apple.mpegurl" ||
     normalizedContentType === "application/x-mpegurl" ||
+    normalizedContentType === "audio/mpegurl" ||
+    normalizedContentType === "audio/x-mpegurl" ||
     normalizedContentType === "application/dash+xml"
   ) {
     return "stream";

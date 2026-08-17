@@ -73,7 +73,7 @@ describe("createBackgroundController", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(browser.tabs.query).toHaveBeenCalledWith({ active: true, currentWindow: true });
+    expect(browser.tabs.query).not.toHaveBeenCalled();
     expect(browser.action.setPopup).toHaveBeenCalledWith({ tabId: 18, popup: "" });
     expect(save).toHaveBeenCalledWith(18, "https://example.test/article");
   });
@@ -99,6 +99,25 @@ describe("createBackgroundController", () => {
     expect(browser.browserAction.setPopup).toHaveBeenCalledWith({ tabId: 19, popup: "" });
   });
 
+  it("saves the exact toolbar-clicked tab without re-querying later focus", async () => {
+    const browser = {
+      action: { onClicked: { addListener: vi.fn() }, setPopup: vi.fn() },
+      tabs: {
+        query: vi.fn().mockResolvedValue([{ id: 99, url: "https://example.test/later-focus" }]),
+        get: vi.fn(),
+      },
+      runtime: { id: "arthur", getURL: vi.fn(), onMessage: { addListener: vi.fn() } },
+    };
+    const save = vi.fn().mockResolvedValue({ status: "success" });
+    createBackgroundController(browser, { save });
+
+    const listener = browser.action.onClicked.addListener.mock.calls[0]?.[0] as ((tab: { id?: number; url?: string }) => void);
+    listener({ id: 18, url: "https://example.test/clicked" });
+
+    await vi.waitFor(() => expect(save).toHaveBeenCalledWith(18, "https://example.test/clicked"));
+    expect(browser.tabs.query).not.toHaveBeenCalled();
+  });
+
   it("prevents concurrent saves across tabs that share one native client", async () => {
     let onClick: ((tab: { id?: number; url?: string }) => void) | undefined;
     const browser = {
@@ -118,17 +137,15 @@ describe("createBackgroundController", () => {
     );
     createBackgroundController(browser, { save });
 
-    browser.tabs.query.mockResolvedValueOnce([{ id: 22, url: "https://example.test/first" }]);
-    onClick?.({ id: 22, url: "https://example.test/article" });
+    onClick?.({ id: 22, url: "https://example.test/first" });
     await Promise.resolve();
-    browser.tabs.query.mockResolvedValueOnce([{ id: 23, url: "https://example.test/second" }]);
     onClick?.({ id: 23, url: "https://example.test/second" });
-    await vi.waitFor(() => expect(browser.tabs.query).toHaveBeenCalledTimes(2));
     await Promise.resolve();
     await Promise.resolve();
 
     expect(save).toHaveBeenCalledTimes(1);
     expect(save).toHaveBeenCalledWith(22, "https://example.test/first");
+    expect(browser.tabs.query).not.toHaveBeenCalled();
     release?.();
   });
 

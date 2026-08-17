@@ -15,6 +15,10 @@ describe("classifyMedia", () => {
     );
   });
 
+  it.each(["audio/mpegurl", "audio/x-mpegurl"])('recognizes %s as an HLS stream', (contentType) => {
+    expect(classifyMedia("https://cdn.test/live", "AUDIO", contentType)).toBe("stream");
+  });
+
   it("leaves DASH manifests as streams", () => {
     expect(classifyMedia("https://cdn.test/live.mpd", "VIDEO", "application/dash+xml")).toBe("stream");
   });

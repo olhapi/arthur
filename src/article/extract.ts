@@ -124,6 +124,34 @@ function applyRenderedSourceSnapshot(source: Document, clone: Document): void {
   }
 }
 
+function numericAttribute(element: Element, name: "width" | "height"): number | undefined {
+  const raw = element.getAttribute(name);
+  if (raw === null || !/^\d+(?:\.\d+)?$/.test(raw.trim())) return undefined;
+  return Number(raw);
+}
+
+function isHidden(element: Element): boolean {
+  if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true") return true;
+  const style = element.getAttribute("style")?.toLowerCase() ?? "";
+  return /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0)(?:;|$)/.test(style);
+}
+
+/** Removes telemetry-only markup from the disposable DOM before URL handling. */
+function removeTrackingElements(document: Document): void {
+  for (const element of document.querySelectorAll("img, picture, audio, video, iframe")) {
+    const width = numericAttribute(element, "width");
+    const height = numericAttribute(element, "height");
+    const source = [element.getAttribute("src"), element.getAttribute("data-src"), element.id, element.className]
+      .filter((value): value is string => typeof value === "string")
+      .join(" ")
+      .toLowerCase();
+    const trackingMarkup = [...element.attributes].some((attribute) => /(?:track|analytics|beacon|pixel)/i.test(attribute.name));
+    const tiny = width !== undefined && height !== undefined && width <= 2 && height <= 2;
+    const trackingName = /(?:track(?:ing)?|analytics|beacon|pixel)/.test(source);
+    if (isHidden(element) || tiny || (trackingMarkup && trackingName)) element.remove();
+  }
+}
+
 function replaceMediaWithPlaceholders(document: Document, createMediaId: () => string): ExtractedMedia[] {
   const media: ExtractedMedia[] = [];
   const byUrl = new Map<string, ExtractedMedia>();
@@ -216,6 +244,7 @@ export function extractArticle(
   const source = normalizeSource(finalUrl);
   const renderedClone = document.cloneNode(true) as Document;
   applyRenderedSourceSnapshot(document, renderedClone);
+  removeTrackingElements(renderedClone);
   materializeRenderedResources(renderedClone, source);
 
   const extracted = new Readability(renderedClone, {

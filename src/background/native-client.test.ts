@@ -100,25 +100,10 @@ async function beginOpenMedia(client: NativeClient, port: FakeNativePort): Promi
 }
 
 describe("NativeClient", () => {
-  it("resolves normal operations only for their matching request IDs", async () => {
+  it("resolves a normal operation for its matching request ID", async () => {
     const port = new FakeNativePort();
     const client = new NativeClient(port);
     const request = client.request({ type: "hello", requestId: "hello-1", protocolVersion: 1 });
-    let settled = false;
-    void request.then(() => {
-      settled = true;
-    });
-
-    port.emitMessage({
-      type: "hello_result",
-      requestId: "another-request",
-      protocolVersion: 1,
-      hostName: "Arthur native host",
-      hostVersion: "0.1.0",
-    });
-    await Promise.resolve();
-    expect(settled).toBe(false);
-
     port.emitMessage({
       type: "hello_result",
       requestId: "hello-1",
@@ -128,6 +113,21 @@ describe("NativeClient", () => {
     });
 
     await expect(request).resolves.toMatchObject({ type: "hello_result", requestId: "hello-1" });
+  });
+
+  it.each([
+    { name: "a wrong request ID", response: { type: "hello_result", requestId: "other", protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" } },
+    { name: "a wrong response type", response: { type: "test_destination_result", requestId: "hello-1", destination: "/Vault/Clippings", writable: true } },
+    { name: "a late duplicate after no matching request", response: { type: "hello_result", requestId: "completed", protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" } },
+  ])("terminally rejects a pending pre-session request after $name", async ({ response }) => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port);
+    const request = client.request({ type: "hello", requestId: "hello-1", protocolVersion: 1 });
+
+    port.emitMessage(response);
+
+    await expect(request).rejects.toBeInstanceOf(NativeProtocolError);
+    expect(port.disconnectCalls).toBe(1);
   });
 
   it("resolves chunks only for the canonical acknowledgement tuple", async () => {

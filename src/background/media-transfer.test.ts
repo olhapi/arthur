@@ -188,6 +188,13 @@ describe("preflightMedia", () => {
     });
   });
 
+  it.each(["audio/mpegurl", "audio/x-mpegurl"])("preserves a remote link for %s HLS responses", async (contentType) => {
+    const response = new Response(new Uint8Array([1]), { headers: { "content-type": contentType } });
+    await expect(preflightMedia(media(), (async () => response) as typeof fetch)).resolves.toMatchObject({
+      status: "fallback", code: "streaming_media",
+    });
+  });
+
   it("cancels a rejected response body instead of retaining a download", async () => {
     let cancelled = false;
     const response = new Response(new ReadableStream<Uint8Array>({
