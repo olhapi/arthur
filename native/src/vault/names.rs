@@ -61,6 +61,52 @@ fn recognized_extension(value: &str) -> bool {
         || value == "bin"
 }
 
+fn percent_decode_utf8(value: &str) -> Option<String> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let high = *bytes.get(index + 1)?;
+        let low = *bytes.get(index + 2)?;
+        let hex = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        decoded.push((hex(high)? << 4) | hex(low)?);
+        index += 3;
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn media_basename(url: &Url) -> String {
+    let basename = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .unwrap_or_default();
+    let Some(decoded) = percent_decode_utf8(basename) else {
+        return basename.to_owned();
+    };
+    let Ok(embedded) = Url::parse(&decoded) else {
+        return basename.to_owned();
+    };
+    if !matches!(embedded.scheme(), "http" | "https") {
+        return basename.to_owned();
+    }
+    embedded
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or(basename)
+        .to_owned()
+}
+
 fn is_unicode_format(value: char) -> bool {
     matches!(
         value,
@@ -121,14 +167,11 @@ pub(super) fn media_stem_and_extension(
 ) -> Result<(String, String), VaultError> {
     let source = normalize_source(source)?;
     let url = Url::parse(&source).map_err(|_| VaultError::InvalidSource)?;
-    let basename = url
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .unwrap_or_default();
+    let basename = media_basename(&url);
     let (stem, url_extension) = basename
         .rsplit_once('.')
         .filter(|(stem, extension)| !stem.is_empty() && !extension.is_empty())
-        .map_or((basename, ""), |(stem, extension)| (stem, extension));
+        .map_or((basename.as_str(), ""), |(stem, extension)| (stem, extension));
     let url_extension = url_extension.to_ascii_lowercase();
     let extension = if recognized_extension(&url_extension) && url_extension != "bin" {
         url_extension
@@ -301,6 +344,17 @@ mod tests {
         assert_eq!(
             media_stem_and_extension("https://example.test/", "application/octet-stream").unwrap(),
             ("article".to_owned(), "bin".to_owned()),
+        );
+        assert_eq!(
+            media_stem_and_extension(
+                "https://substackcdn.example.test/image/fetch/format/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2F29b750ad-68a7-4f20-ba4b-a2e0973d925e_1600x853.jpeg",
+                "image/jpeg",
+            )
+            .unwrap(),
+            (
+                "29b750ad-68a7-4f20-ba4b-a2e0973d925e_1600x853".to_owned(),
+                "jpeg".to_owned(),
+            ),
         );
     }
 
