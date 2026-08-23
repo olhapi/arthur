@@ -1,4 +1,4 @@
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 
 const require = createRequire(import.meta.url);
 const scriptDir = dirname(fileURLToPath(import.meta.url));
+const googleVerificationFile = "googlea59ef01bb1d170e1.html";
 
 export function buildSite({
   rootDir = resolve(scriptDir, "../.."),
@@ -22,6 +23,10 @@ export function buildSite({
     await mkdir(outputDir, { recursive: true });
     await cp(resolve(rootDir, "site/source"), outputDir, { recursive: true });
     await rm(resolve(outputDir, "site.test.ts"), { force: true });
+
+    const verificationPath = resolve(outputDir, googleVerificationFile);
+    const verificationContent = await readFile(verificationPath, "utf8");
+    await writeFile(verificationPath, verificationContent.replace(/\r?\n$/, ""), "utf8");
 
     const cliPackage = require.resolve("@tailwindcss/cli/package.json");
     const cliPath = resolve(dirname(cliPackage), "dist/index.mjs");

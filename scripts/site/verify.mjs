@@ -4,6 +4,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
+const GOOGLE_VERIFICATION_FILE = "googlea59ef01bb1d170e1.html";
+const GOOGLE_VERIFICATION_CONTENT = `google-site-verification: ${GOOGLE_VERIFICATION_FILE}`;
 
 export function verifyHtml(html, relativePath) {
   const errors = [];
@@ -44,6 +46,15 @@ export async function verifySite({ outputDir = resolve(scriptDir, "../../.site-d
     await access(resolve(outputDir, "assets/styles.css"), constants.R_OK);
   } catch {
     errors.push("assets/styles.css: missing compiled stylesheet");
+  }
+
+  try {
+    const verificationContent = await readFile(resolve(outputDir, GOOGLE_VERIFICATION_FILE), "utf8");
+    if (verificationContent !== GOOGLE_VERIFICATION_CONTENT) {
+      errors.push(`${GOOGLE_VERIFICATION_FILE}: invalid Google Search Console verification content`);
+    }
+  } catch {
+    errors.push(`${GOOGLE_VERIFICATION_FILE}: missing Google Search Console verification file`);
   }
 
   return errors;
