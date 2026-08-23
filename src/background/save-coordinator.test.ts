@@ -220,6 +220,57 @@ describe("SaveCoordinator", () => {
     });
   });
 
+  it("downloads extracted Markdown when the native helper disconnects during negotiation", async () => {
+    const native = new FakeNativeClient();
+    native.helloError = new NativeDisconnectedError();
+    const status = new RecordingStatus();
+    const downloaded: ExtractedArticle[] = [];
+    const extracted = article({ media: [] });
+    const coordinator = new SaveCoordinator({
+      loadSettings: async () => ({ destination: "/Vault/Clippings" }),
+      extract: async () => extracted,
+      fetcher: fetch,
+      nativeClient: native as never,
+      status,
+      createSessionId: () => SESSION_ID,
+      fallbackSave: async (next: ExtractedArticle) => {
+        downloaded.push(next);
+        return "Article.md";
+      },
+    } as never);
+
+    await expect(coordinator.save(1, "https://example.test/article")).resolves.toMatchObject({
+      status: "success",
+      articlePath: "Article.md",
+      warnings: [],
+    });
+    expect(downloaded).toEqual([extracted]);
+    expect(native.calls).toEqual(["hello"]);
+    expect(status.calls).toEqual(["saving", "success"]);
+  });
+
+  it("downloads extracted Markdown when opening the native helper throws", async () => {
+    const downloaded: ExtractedArticle[] = [];
+    const extracted = article({ media: [] });
+    const coordinator = new SaveCoordinator({
+      loadSettings: async () => ({ destination: "/Vault/Clippings" }),
+      extract: async () => extracted,
+      fetcher: fetch,
+      nativeClient: () => { throw new Error("Native application is not installed."); },
+      status: new RecordingStatus(),
+      fallbackSave: async (next: ExtractedArticle) => {
+        downloaded.push(next);
+        return "Article.md";
+      },
+    } as never);
+
+    await expect(coordinator.save(1, "https://example.test/article")).resolves.toMatchObject({
+      status: "success",
+      articlePath: "Article.md",
+    });
+    expect(downloaded).toEqual([extracted]);
+  });
+
   it("retires a disconnected client and lazily creates a new client for the next serialized save", async () => {
     const disconnected = new FakeNativeClient();
     disconnected.helloError = new NativeDisconnectedError();

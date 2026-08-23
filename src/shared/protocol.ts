@@ -85,6 +85,12 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
     .strict(),
   z
     .object({
+      type: z.literal("choose_destination"),
+      requestId: RequestIdSchema,
+    })
+    .strict(),
+  z
+    .object({
       type: z.literal("begin_save"),
       requestId: RequestIdSchema,
       sessionId: SessionIdSchema,
@@ -146,6 +152,13 @@ export const HostMessageSchema = z.discriminatedUnion("type", [
       requestId: RequestIdSchema,
       destination: PathSchema,
       writable: z.boolean(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("choose_destination_result"),
+      requestId: RequestIdSchema,
+      destination: PathSchema,
     })
     .strict(),
   z

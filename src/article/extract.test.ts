@@ -80,6 +80,56 @@ describe("extractArticle", () => {
     expect(article.media).not.toContainEqual(expect.objectContaining({ url: "https://example.test/media/fallback.jpg" }));
   });
 
+  it("retains Substack subscriber headings rendered as siblings before the paywall marker", () => {
+    const freeParagraphs = "<p>This free introduction deliberately provides enough ordinary article text for Readability to select Substack's available-content container instead of the enclosing post element.</p>".repeat(28);
+    const document = new DOMParser().parseFromString(
+      `<!doctype html><html><head><title>Subscriber article</title></head><body>
+        <article class="typography newsletter-post post">
+          <div class="post-header"><h1>Subscriber article</h1></div>
+          <div class="dt-post-body"><div class="available-content"><div class="body markup">
+            ${freeParagraphs}
+          </div></div></div>
+          <h2 class="header-anchor-post">Teaching has helped me immensely with growing from Senior all the way to CTO</h2>
+          <div data-component-name="PaywallToDOM" class="paywall-jump"></div>
+          <p>This paid continuation is rendered in the authenticated Substack tab as a sibling after the paywall marker.</p>
+          <figure><img src="https://cdn.example.test/subscriber-chart.png" alt="Subscriber chart"></figure>
+          <div class="post-footer"><p>Footer controls must not be saved with the article.</p></div>
+        </article>
+      </body></html>`,
+      "text/html",
+    );
+
+    const article = extractArticle(document, "https://example.substack.com/p/subscriber-article");
+
+    expect(article.markdown).toContain("## Teaching has helped me immensely with growing from Senior all the way to CTO");
+    expect(article.markdown).toContain("This paid continuation is rendered in the authenticated Substack tab as a sibling after the paywall marker.");
+    expect(article.media).toContainEqual(expect.objectContaining({ url: "https://cdn.example.test/subscriber-chart.png" }));
+    expect(article.markdown).not.toContain("Footer controls must not be saved with the article.");
+  });
+
+  it("retains Substack subscriber headings when the paywall marker is inside the article body", () => {
+    const freeParagraphs = "<p>This free introduction provides enough article text for Readability to select the Substack body.</p>".repeat(28);
+    const document = new DOMParser().parseFromString(
+      `<!doctype html><html><head><title>Nested subscriber article</title></head><body>
+        <article class="typography newsletter-post post">
+          <div class="post-header"><h1>Nested subscriber article</h1></div>
+          <div class="dt-post-body"><div class="available-content"><div class="body markup">
+            ${freeParagraphs}
+            <h2 class="header-anchor-post">Teaching has helped me immensely with growing from Senior all the way to CTO</h2>
+            <div data-component-name="PaywallToDOM" class="paywall-jump"></div>
+            <p>I did the same thing there, helped and taught others as much as possible.</p>
+          </div></div></div>
+        </article>
+      </body></html>`,
+      "text/html",
+    );
+
+    const article = extractArticle(document, "https://example.substack.com/p/nested-subscriber-article");
+
+    expect(article.markdown).toContain("## Teaching has helped me immensely with growing from Senior all the way to CTO");
+    expect(article.markdown).toContain("I did the same thing there, helped and taught others as much as possible.");
+  });
+
   it("unwraps a linked downloadable image into a local attachment embed", () => {
     const imageId = "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832";
     const document = new DOMParser().parseFromString(

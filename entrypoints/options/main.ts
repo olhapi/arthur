@@ -21,6 +21,7 @@ export interface ConnectionResult {
 export interface OptionsDependencies {
   storage: OptionsStorage;
   testConnection(destination: string): Promise<ConnectionResult>;
+  chooseDestination?(): Promise<string | undefined>;
 }
 
 export interface OptionsPage {
@@ -47,6 +48,7 @@ function validateDestination(value: string): ArthurSettings | undefined {
 export function mountOptionsPage(document: Document, dependencies: OptionsDependencies): OptionsPage {
   const form = requiredElement<HTMLFormElement>(document, "#options-form");
   const destination = requiredElement<HTMLInputElement>(document, "#destination");
+  const chooseDestination = requiredElement<HTMLButtonElement>(document, "#choose-destination");
   const testConnection = requiredElement<HTMLButtonElement>(document, "#test-connection");
   const hostStatus = requiredElement<HTMLElement>(document, "#host-status");
   const folderStatus = requiredElement<HTMLElement>(document, "#folder-status");
@@ -63,6 +65,22 @@ export function mountOptionsPage(document: Document, dependencies: OptionsDepend
   };
 
   destination.addEventListener("input", () => destination.setCustomValidity(""));
+
+  chooseDestination.addEventListener("click", async () => {
+    if (dependencies.chooseDestination === undefined) return;
+    chooseDestination.disabled = true;
+    try {
+      const selected = await dependencies.chooseDestination();
+      if (selected === undefined) return;
+      destination.value = selected;
+      const settings = parseInput();
+      if (settings === undefined) return;
+      await dependencies.storage.saveSettings(settings);
+      renderStatus(folderStatus, { kind: "success", message: "Settings saved." });
+    } finally {
+      chooseDestination.disabled = false;
+    }
+  });
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -108,8 +126,34 @@ function browserStorage(): OptionsStorage {
 
 export interface NativeTestClient {
   hello(): Promise<unknown>;
-  request(message: { type: "test_destination"; requestId: string; destination: string }): Promise<unknown>;
+  request(
+    message:
+      | { type: "test_destination"; requestId: string; destination: string }
+      | { type: "choose_destination"; requestId: string },
+  ): Promise<unknown>;
   close(): void;
+}
+
+export async function chooseNativeDestination(
+  createClient: () => NativeTestClient = () =>
+    connectNativeClient((hostName) => browser.runtime.connectNative(hostName)),
+): Promise<string | undefined> {
+  let client: NativeTestClient | undefined;
+  try {
+    client = createClient();
+    await client.hello();
+    const response = await client.request({ type: "choose_destination", requestId: crypto.randomUUID() });
+    const settings = ArthurSettingsSchema.safeParse(
+      typeof response === "object" && response !== null && (response as { type?: unknown }).type === "choose_destination_result"
+        ? { destination: (response as { destination?: unknown }).destination }
+        : undefined,
+    );
+    return settings.success ? settings.data.destination : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    client?.close();
+  }
 }
 
 export async function testNativeConnection(
@@ -166,5 +210,6 @@ if (document.querySelector("#options-form") !== null) {
   void mountOptionsPage(document, {
     storage: browserStorage(),
     testConnection: testNativeConnection,
+    chooseDestination: chooseNativeDestination,
   }).ready;
 }

@@ -6,11 +6,12 @@ import { CHROMIUM_EXTENSION_ID, CHROMIUM_PUBLIC_KEY_DER_BASE64, getChromiumExten
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const TARGETS = [
-  { name: "chrome", directory: "chrome-mv3", manifestVersion: 3, chromium: true },
-  { name: "edge", directory: "edge-mv3", manifestVersion: 3, chromium: true },
+  { name: "chrome", directory: "chrome-mv3", manifestVersion: 3, chromium: true, fixedChromiumIdentity: true },
+  { name: "edge", directory: "edge-mv3", manifestVersion: 3, chromium: true, fixedChromiumIdentity: true },
   { name: "firefox", directory: "firefox-mv2", manifestVersion: 2, chromium: false },
 ];
-const REQUIRED_PERMISSIONS = ["activeTab", "storage", "nativeMessaging"];
+const CHROME_STORE_TARGET = { name: "chrome store", directory: "chrome-mv3-store", manifestVersion: 3, chromium: true, fixedChromiumIdentity: false };
+const REQUIRED_PERMISSIONS = ["activeTab", "storage", "nativeMessaging", "downloads"];
 const MATCHES = ["http://*/*", "https://*/*"];
 const ICONS = {
   16: "icons/arthur-16.png",
@@ -52,9 +53,10 @@ function validateManifest(manifest, target) {
   exactArray(manifest.permissions, target.manifestVersion === 3 ? REQUIRED_PERMISSIONS : [...REQUIRED_PERMISSIONS, ...MATCHES], `${target.name} permissions`);
   if (target.chromium) {
     exactArray(manifest.host_permissions, MATCHES, `${target.name} host permissions`);
-    if (manifest.key !== CHROMIUM_PUBLIC_KEY_DER_BASE64 || getChromiumExtensionId(manifest.key) !== CHROMIUM_EXTENSION_ID) {
+    if (target.fixedChromiumIdentity && (manifest.key !== CHROMIUM_PUBLIC_KEY_DER_BASE64 || getChromiumExtensionId(manifest.key) !== CHROMIUM_EXTENSION_ID)) {
       fail(`${target.name} manifest key does not produce Arthur's fixed Chromium identity.`);
     }
+    if (!target.fixedChromiumIdentity && Object.hasOwn(manifest, "key")) fail(`${target.name} manifest must not contain a fixed Chromium key.`);
   } else if (Object.hasOwn(manifest, "key")) {
     fail(`${target.name} manifest must not contain Chromium's key.`);
   }
@@ -95,6 +97,22 @@ export async function validateBuildArtifacts({ root = path.join(ROOT, ".output")
     targets.push(target.name);
   }
   return { smoke: "build-artifacts", targets };
+}
+
+export async function validateChromeStoreBuild({ root = path.join(ROOT, ".output") } = {}) {
+  const canonicalRoot = path.resolve(root);
+  const artifact = path.join(canonicalRoot, CHROME_STORE_TARGET.directory);
+  const manifest = JSON.parse(await fs.readFile(path.join(artifact, "manifest.json"), "utf8"));
+  validateManifest(manifest, CHROME_STORE_TARGET);
+  await Promise.all([
+    assertFile(artifact, "background.js", "Chrome Web Store background entrypoint"),
+    assertFile(artifact, "content-scripts/content.js", "Chrome Web Store content-script entrypoint"),
+    assertFile(artifact, "options.html", "Chrome Web Store options page"),
+    assertFile(artifact, "status.html", "Chrome Web Store status page"),
+    ...Object.values(ICONS).map((file) => assertFile(artifact, file, `Chrome Web Store icon ${file}`)),
+    ...STATUS_ICONS.map((file) => assertFile(artifact, file, `Chrome Web Store status icon ${file}`)),
+  ]);
+  return { smoke: "chrome-store-build", targets: ["chrome"] };
 }
 
 function parseArguments(argv) {

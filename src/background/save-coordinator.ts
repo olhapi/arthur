@@ -2,7 +2,7 @@ import type { ExtractedArticle, ExtractedMedia } from "../article/extract.js";
 import { normalizeSource } from "../article/source.js";
 import { MEDIA_LIMITS } from "../shared/constants.js";
 import { ArthurSettingsSchema } from "../shared/settings.js";
-import { NativeClient, NativeClientError } from "./native-client.js";
+import { NativeClient, NativeClientError, NativeDisconnectedError } from "./native-client.js";
 import { preflightMedia, transferMedia, type PreparedMedia } from "./media-transfer.js";
 import type { SaveStatus, StatusDetail } from "./status.js";
 
@@ -29,6 +29,7 @@ export type SaveOutcome =
 export interface SaveCoordinatorDependencies {
   loadSettings: () => Promise<unknown>;
   extract: (tabId: number, tabUrl: string) => Promise<ExtractedArticle>;
+  fallbackSave?: (article: ExtractedArticle) => Promise<string>;
   fetcher: typeof fetch;
   nativeClient: NativeClient | (() => NativeClient);
   status: SaveStatus;
@@ -151,8 +152,16 @@ export class SaveCoordinator {
         throw new CoordinatorError("extraction_failed", "The current page could not be extracted as an article.");
       }
 
-      client = this.getNativeClient();
-      await client.hello();
+      try {
+        client = this.getNativeClient();
+        await client.hello();
+      } catch (error) {
+        if ((client !== undefined && !(error instanceof NativeDisconnectedError)) || this.dependencies.fallbackSave === undefined) throw error;
+        const articlePath = await this.dependencies.fallbackSave(article);
+        await this.dependencies.status.success(tabId);
+        return { status: "success", articlePath, warnings: [] };
+      }
+
       prepared = await this.preflightAll(uniqueMedia(article.media));
       const markdown = rewritePreflightFallbacks(article.markdown, prepared);
       const warnings: SaveWarning[] = prepared

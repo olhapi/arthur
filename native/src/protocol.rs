@@ -31,6 +31,9 @@ pub enum ClientMessage {
         request_id: String,
         destination: String,
     },
+    ChooseDestination {
+        request_id: String,
+    },
     BeginSave {
         request_id: String,
         session_id: String,
@@ -98,6 +101,10 @@ pub enum HostMessage {
         request_id: String,
         destination: String,
         writable: bool,
+    },
+    ChooseDestinationResult {
+        request_id: String,
+        destination: String,
     },
     SaveResult {
         request_id: String,
@@ -209,6 +216,11 @@ fn validate_client(message: &mut ClientMessage) -> Result<(), ProtocolError> {
             destination,
         } => {
             if !bounded(request_id, 128) || !absolute(destination) {
+                return Err(ProtocolError::Invalid);
+            }
+        }
+        ClientMessage::ChooseDestination { request_id } => {
+            if !bounded(request_id, 128) {
                 return Err(ProtocolError::Invalid);
             }
         }
@@ -333,6 +345,12 @@ fn validate_host(message: &mut HostMessage) -> Result<(), ProtocolError> {
             request_id,
             destination,
             ..
+        } => (bounded(request_id, 128) && absolute(destination))
+            .then_some(())
+            .ok_or(ProtocolError::Invalid),
+        HostMessage::ChooseDestinationResult {
+            request_id,
+            destination,
         } => (bounded(request_id, 128) && absolute(destination))
             .then_some(())
             .ok_or(ProtocolError::Invalid),

@@ -1,4 +1,5 @@
 use crate::{
+    destination_picker::choose_destination,
     protocol::{ClientMessage, HostMessage},
     vault::{MediaDisposition, MediaSpec, SaveSpec, Vault, VaultError, VaultTransaction},
 };
@@ -70,6 +71,18 @@ impl SessionManager {
                     writable: probe.writable,
                 },
                 Err(error) => vault_error(Some(request_id), None, error, ErrorContext::Destination),
+            },
+            ClientMessage::ChooseDestination { request_id } => match choose_destination() {
+                Ok(destination) => HostMessage::ChooseDestinationResult {
+                    request_id,
+                    destination: destination.to_string_lossy().into_owned(),
+                },
+                Err(()) => error(
+                    Some(request_id),
+                    None,
+                    "destination_selection_cancelled",
+                    "No destination folder was selected.",
+                ),
             },
             ClientMessage::BeginSave {
                 request_id,

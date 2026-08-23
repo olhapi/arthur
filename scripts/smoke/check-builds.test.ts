@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { CHROMIUM_PUBLIC_KEY_DER_BASE64 } from "../native-host/identity.mjs";
-import { validateBuildArtifacts } from "./check-builds.mjs";
+import { validateBuildArtifacts, validateChromeStoreBuild } from "./check-builds.mjs";
 
 const ICONS = {
   16: "icons/arthur-16.png",
@@ -33,8 +33,8 @@ async function buildFixture(
       name: "arthur",
       version: "0.1.0",
       permissions: target.manifestVersion === 3
-        ? ["activeTab", "storage", "nativeMessaging"]
-        : ["activeTab", "storage", "nativeMessaging", "http://*/*", "https://*/*"],
+        ? ["activeTab", "storage", "nativeMessaging", "downloads"]
+        : ["activeTab", "storage", "nativeMessaging", "downloads", "http://*/*", "https://*/*"],
       browser_specific_settings: { gecko: { id: "arthur@olhapi.com" } },
       options_ui: { page: "options.html", open_in_tab: false },
       content_scripts: [{ matches: ["http://*/*", "https://*/*"], js: ["content-scripts/content.js"] }],
@@ -51,6 +51,31 @@ async function buildFixture(
       await mkdir(path.dirname(path.join(artifact, relative)), { recursive: true });
       await writeFile(path.join(artifact, relative), "fixture");
     }
+  }
+  return root;
+}
+
+async function buildChromeStoreFixture({ includeKey = false } = {}) {
+  const root = await mkdtemp(path.join(tmpdir(), "arthur-store-build-smoke-"));
+  const artifact = path.join(root, "chrome-mv3-store");
+  await mkdir(path.join(artifact, "content-scripts"), { recursive: true });
+  await writeFile(path.join(artifact, "manifest.json"), JSON.stringify({
+    manifest_version: 3,
+    name: "arthur",
+    version: "0.1.0",
+    permissions: ["activeTab", "storage", "nativeMessaging", "downloads"],
+    host_permissions: ["http://*/*", "https://*/*"],
+    browser_specific_settings: { gecko: { id: "arthur@olhapi.com" } },
+    options_ui: { page: "options.html", open_in_tab: false },
+    content_scripts: [{ matches: ["http://*/*", "https://*/*"], js: ["content-scripts/content.js"] }],
+    background: { service_worker: "background.js" },
+    action: { default_icon: ICONS },
+    icons: ICONS,
+    ...(includeKey ? { key: CHROMIUM_PUBLIC_KEY_DER_BASE64 } : {}),
+  }));
+  for (const relative of ["background.js", "content-scripts/content.js", "options.html", "status.html", ...Object.values(ICONS), ...STATUS_ICONS]) {
+    await mkdir(path.dirname(path.join(artifact, relative)), { recursive: true });
+    await writeFile(path.join(artifact, relative), "fixture");
   }
   return root;
 }
@@ -83,5 +108,10 @@ describe("check-builds", () => {
   it("rejects a build that omits a dynamic toolbar-status icon", async () => {
     const root = await buildFixture(undefined, { includeStatusIcons: false });
     await expect(validateBuildArtifacts({ root })).rejects.toThrow(/missing|ENOENT/i);
+  });
+
+  it("rejects a Chrome Web Store build that contains a fixed development key", async () => {
+    const root = await buildChromeStoreFixture({ includeKey: true });
+    await expect(validateChromeStoreBuild({ root })).rejects.toThrow(/key/i);
   });
 });

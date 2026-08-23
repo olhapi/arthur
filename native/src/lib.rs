@@ -1,3 +1,4 @@
+mod destination_picker;
 pub mod framing;
 pub mod protocol;
 pub mod server;

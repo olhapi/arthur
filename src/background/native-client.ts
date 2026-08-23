@@ -144,6 +144,8 @@ function responseMatchesRequest(response: HostMessage, request: RequestMessage):
       return response.type === "hello_result";
     case "test_destination":
       return response.type === "test_destination_result";
+    case "choose_destination":
+      return response.type === "choose_destination_result";
     case "begin_save":
     case "begin_media":
     case "abort_save":

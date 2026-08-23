@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mountOptionsPage, testNativeConnection } from "./main.js";
+import { chooseNativeDestination, mountOptionsPage, testNativeConnection } from "./main.js";
 
 function optionsDocument(): Document {
   document.body.innerHTML = `
@@ -10,6 +10,7 @@ function optionsDocument(): Document {
       <form id="options-form">
         <label for="destination">Destination folder</label>
         <input id="destination" name="destination" type="text" required>
+        <button id="choose-destination" type="button">Choose article folder</button>
         <button type="submit">Save settings</button>
       </form>
       <button id="test-connection" type="button">Test connection</button>
@@ -45,6 +46,32 @@ describe("mountOptionsPage", () => {
     await Promise.resolve();
 
     expect(storage.saveSettings).toHaveBeenCalledWith({ destination: "/Vault/Clippings" });
+    expect(document.querySelector("#folder-status")?.textContent).toBe("Settings saved.");
+  });
+
+  it("stores the folder selected by the native picker", async () => {
+    const storage = {
+      getSettings: vi.fn().mockResolvedValue(undefined),
+      saveSettings: vi.fn().mockResolvedValue(undefined),
+    };
+    const chooseDestination = vi.fn().mockResolvedValue("/Users/olhapi/Library/Mobile Documents/iCloud~md~obsidian/Documents/engineering");
+    const page = mountOptionsPage(optionsDocument(), {
+      storage,
+      testConnection: vi.fn(),
+      chooseDestination,
+    });
+    await page.ready;
+
+    document.querySelector<HTMLButtonElement>("#choose-destination")!.click();
+
+    await vi.waitFor(() =>
+      expect(storage.saveSettings).toHaveBeenCalledWith({
+        destination: "/Users/olhapi/Library/Mobile Documents/iCloud~md~obsidian/Documents/engineering",
+      }),
+    );
+    expect(document.querySelector<HTMLInputElement>("#destination")?.value).toBe(
+      "/Users/olhapi/Library/Mobile Documents/iCloud~md~obsidian/Documents/engineering",
+    );
     expect(document.querySelector("#folder-status")?.textContent).toBe("Settings saved.");
   });
 
@@ -121,6 +148,25 @@ describe("testNativeConnection", () => {
       host: { kind: "success", message: "Native host available." },
       folder: { kind: "error", message: "Destination could not be checked." },
     });
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("chooseNativeDestination", () => {
+  it("returns the absolute folder supplied by the native picker", async () => {
+    const client = {
+      hello: vi.fn().mockResolvedValue({ type: "hello_result" }),
+      request: vi.fn().mockResolvedValue({
+        type: "choose_destination_result",
+        requestId: "picker-1",
+        destination: "/Users/olhapi/Library/Mobile Documents/iCloud~md~obsidian/Documents/engineering",
+      }),
+      close: vi.fn(),
+    };
+
+    await expect(chooseNativeDestination(() => client)).resolves.toBe(
+      "/Users/olhapi/Library/Mobile Documents/iCloud~md~obsidian/Documents/engineering",
+    );
     expect(client.close).toHaveBeenCalledOnce();
   });
 });

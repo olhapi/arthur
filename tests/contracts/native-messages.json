@@ -1,6 +1,7 @@
 {
   "validClientMessages": [
     { "type": "hello", "requestId": "r1", "protocolVersion": 1 },
+    { "type": "choose_destination", "requestId": "r1-picker" },
     { "type": "test_destination", "requestId": "r2", "destination": "/tmp/Arthur" },
     { "type": "begin_save", "requestId": "r3", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "destination": "/tmp/Arthur", "source": "https://example.test/a", "title": "Article", "markdown": "arthur-media://7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832" },
     { "type": "begin_media", "requestId": "r4", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "source": "https://example.test/hero.webp", "kind": "image", "contentType": "image/webp", "byteLength": 4 },
@@ -11,6 +12,7 @@
   ],
   "invalidClientMessages": [
     { "type": "hello", "requestId": "r1", "protocolVersion": 1, "extra": true },
+    { "type": "choose_destination", "requestId": "r1-picker", "extra": true },
     { "type": "begin_save", "requestId": "r3", "sessionId": "not-a-uuid", "destination": "/tmp/Arthur", "source": "file:///tmp/a", "title": "Article", "markdown": "Body" },
     { "type": "commit_save", "requestId": "r3-max", "sessionId": "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF" },
     { "type": "media_chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "sequence": -1, "data": "AA==" },
@@ -20,6 +22,7 @@
   ],
   "validHostMessages": [
     { "type": "hello_result", "requestId": "r1", "protocolVersion": 1, "hostName": "com.olhapi.arthur", "hostVersion": "0.1.0" },
+    { "type": "choose_destination_result", "requestId": "r1-picker", "destination": "/tmp/Arthur" },
     { "type": "test_destination_result", "requestId": "r2", "destination": "/tmp/Arthur", "writable": true },
     { "type": "save_result", "requestId": "r6", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "savedPath": "/tmp/Arthur/Article.md" },
     { "type": "ack", "requestId": "chunk", "sessionId": "a5a74c85-92de-4a5d-9768-4e66c4d64987", "mediaId": "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832", "sequence": 9007199254740991 },
@@ -28,6 +31,7 @@
   ],
   "invalidHostMessages": [
     { "type": "ack", "requestId": "chunk", "filename": "not-in-the-canonical-schema.webp" },
+    { "type": "choose_destination_result", "requestId": "r1-picker", "destination": "relative" },
     { "type": "save_result", "requestId": "r6", "sessionId": "not-a-uuid", "savedPath": "relative.md" },
     { "type": "ack", "requestId": "chunk", "sequence": 9007199254740992 }
   ]

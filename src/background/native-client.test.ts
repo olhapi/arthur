@@ -115,6 +115,22 @@ describe("NativeClient", () => {
     await expect(request).resolves.toMatchObject({ type: "hello_result", requestId: "hello-1" });
   });
 
+  it("resolves a folder selected by the native host", async () => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port);
+    const request = client.request({ type: "choose_destination", requestId: "picker-1" });
+    port.emitMessage({
+      type: "choose_destination_result",
+      requestId: "picker-1",
+      destination: "/Users/olhapi/Library/Mobile Documents/iCloud~md~obsidian/Documents/engineering",
+    });
+
+    await expect(request).resolves.toMatchObject({
+      type: "choose_destination_result",
+      destination: "/Users/olhapi/Library/Mobile Documents/iCloud~md~obsidian/Documents/engineering",
+    });
+  });
+
   it.each([
     { name: "a wrong request ID", response: { type: "hello_result", requestId: "other", protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" } },
     { name: "a wrong response type", response: { type: "test_destination_result", requestId: "hello-1", destination: "/Vault/Clippings", writable: true } },

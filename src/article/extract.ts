@@ -124,6 +124,49 @@ function applyRenderedSourceSnapshot(source: Document, clone: Document): void {
   }
 }
 
+function isSubstackPostTerminator(element: Element): boolean {
+  return (
+    element.matches("footer") ||
+    element.classList.contains("post-footer") ||
+    element.classList.contains("post-ufi") ||
+    element.classList.contains("single-post-section") ||
+    element.classList.contains("comments-section")
+  );
+}
+
+/**
+ * Substack renders continuation nodes as direct article siblings outside the
+ * body Readability chooses. The section heading can precede PaywallToDOM while
+ * its paragraphs follow it, so fold the entire continuation range into the
+ * disposable article body while leaving post controls and comments out.
+ */
+function materializeSubstackSubscriberContent(document: Document): void {
+  for (const post of document.querySelectorAll<HTMLElement>("article.newsletter-post.post")) {
+    const body = post.querySelector<HTMLElement>(".dt-post-body .available-content .body.markup");
+    const paywall = post.querySelector<HTMLElement>('[data-component-name="PaywallToDOM"].paywall-jump');
+    if (body === null || paywall === null) continue;
+
+    let bodyContainer: HTMLElement = body;
+    while (bodyContainer.parentElement !== post) {
+      if (bodyContainer.parentElement === null) break;
+      bodyContainer = bodyContainer.parentElement;
+    }
+
+    let sibling = bodyContainer.nextElementSibling;
+    while (sibling !== null && !isSubstackPostTerminator(sibling)) {
+      const next = sibling.nextElementSibling;
+      if (sibling === paywall) sibling.remove();
+      else body.append(sibling);
+      sibling = next;
+    }
+    paywall.remove();
+
+    for (const heading of body.querySelectorAll("h1.header-anchor-post, h2.header-anchor-post, h3.header-anchor-post, h4.header-anchor-post, h5.header-anchor-post, h6.header-anchor-post")) {
+      heading.classList.remove("header-anchor-post");
+    }
+  }
+}
+
 function numericAttribute(element: Element, name: "width" | "height"): number | undefined {
   const raw = element.getAttribute(name);
   if (raw === null || !/^\d+(?:\.\d+)?$/.test(raw.trim())) return undefined;
@@ -258,6 +301,7 @@ export function extractArticle(
   const source = normalizeSource(finalUrl);
   const renderedClone = document.cloneNode(true) as Document;
   applyRenderedSourceSnapshot(document, renderedClone);
+  materializeSubstackSubscriberContent(renderedClone);
   removeTrackingElements(renderedClone);
   materializeRenderedResources(renderedClone, source);
 

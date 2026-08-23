@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.32.1",
-  "engines": { "node": ">=22.0.0" },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "postinstall": "wxt prepare",
     "dev": "wxt",
@@ -25,11 +27,15 @@
     "build:firefox": "wxt build -b firefox",
     "build": "pnpm build:native && pnpm build:chrome && pnpm build:edge && pnpm build:firefox",
     "zip": "wxt zip -b chrome && wxt zip -b edge && wxt zip -b firefox && node scripts/smoke/check-zips.mjs",
+    "zip:chrome:store": "wxt zip -b chrome --mode store && node scripts/smoke/check-chrome-store-build.mjs",
+    "site:build": "node scripts/site/build.mjs",
+    "site:verify": "pnpm site:build && node scripts/site/verify.mjs",
     "verify:native": "pnpm test:native && pnpm format:native:check && pnpm lint:native && pnpm build:native && pnpm audit:native",
     "smoke": "node scripts/smoke/check-builds.mjs",
     "acceptance:native": "node scripts/smoke/native-roundtrip.mjs --binary native/target/release/arthur-native-host",
     "verify": "pnpm test && pnpm typecheck && pnpm test:native && pnpm format:native:check && pnpm lint:native && pnpm build && pnpm smoke && pnpm acceptance:native && pnpm audit --audit-level high && pnpm audit:native"
   },
+  "license": "MIT",
   "dependencies": {
     "@mozilla/readability": "0.6.0",
     "dompurify": "3.4.13",
@@ -37,8 +43,12 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "4.3.0",
+    "@tailwindcss/cli": "4.3.0",
     "@types/turndown": "5.0.6",
     "happy-dom": "20.11.2",
+    "tailwindcss": "4.3.0",
+    "tailwindcss": "4.3.0",
     "typescript": "7.0.2",
     "vitest": "4.1.10",
     "wxt": "0.21.4"

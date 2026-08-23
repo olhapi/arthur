@@ -2,6 +2,7 @@ import { browser } from "wxt/browser";
 import { defineBackground } from "wxt/utils/define-background";
 
 import type { ExtractedArticle } from "../src/article/extract.js";
+import { downloadArticle } from "../src/background/browser-download.js";
 import { SaveCoordinator } from "../src/background/save-coordinator.js";
 import { connectNativeClient } from "../src/background/native-client.js";
 import {
@@ -224,6 +225,11 @@ function createProductionCoordinator(status: StatusController): SaveCoordinator 
     extract: async (tabId): Promise<ExtractedArticle> =>
       (await browser.tabs.sendMessage(tabId, { type: "extract_article" })) as ExtractedArticle,
     fetcher: fetch,
+    fallbackSave: (article) => downloadArticle(article, {
+      download: (details) => browser.downloads.download(details),
+      createObjectURL: URL.createObjectURL,
+      revokeObjectURL: URL.revokeObjectURL,
+    }),
     // SaveCoordinator owns one client per live native connection and asks this
     // factory for a replacement only after a terminal disconnect.
     nativeClient: () => connectNativeClient((hostName) => browser.runtime.connectNative(hostName)),

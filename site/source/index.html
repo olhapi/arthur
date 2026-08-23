@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Arthur saves the article you are reading as clean Markdown, locally.">
+    <title>Arthur — save articles as Markdown</title>
+    <link rel="icon" href="assets/arthur.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="assets/styles.css">
+    <script type="module" src="site.js"></script>
+  </head>
+  <body class="bg-paper font-sans text-ink antialiased">
+    <a class="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-white focus:px-4 focus:py-3 focus:text-moss focus:shadow-lg" href="#main-content">Skip to content</a>
+    <header class="mx-auto flex max-w-6xl items-center justify-between px-6 py-6 lg:px-8">
+      <a class="flex items-center gap-3 font-semibold tracking-tight" href="#top" aria-label="Arthur home">
+        <img class="h-9 w-9" src="assets/arthur.svg" alt="">
+        Arthur
+      </a>
+      <a class="text-sm font-medium text-ink/70 underline decoration-moss/30 underline-offset-4 hover:text-moss" href="#support">Help</a>
+    </header>
+
+    <main id="main-content">
+      <section id="top" class="relative overflow-hidden px-6 pb-20 pt-12 lg:px-8 lg:pb-28 lg:pt-20">
+        <div class="absolute inset-x-0 top-0 -z-10 h-96 bg-[radial-gradient(circle_at_top_right,_#b9d6bd_0,_transparent_55%)]"></div>
+        <div class="mx-auto grid max-w-6xl gap-12 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
+          <div>
+            <p class="mb-5 inline-flex rounded-full border border-moss/15 bg-white/70 px-3 py-1 text-sm font-medium text-moss">For people who want to keep what they read</p>
+            <h1 class="max-w-3xl text-5xl font-semibold tracking-[-0.04em] text-ink sm:text-6xl lg:text-7xl">Save the article, not the clutter.</h1>
+            <p class="mt-6 max-w-xl text-lg leading-8 text-ink/70">Arthur turns the rendered article in your active tab into clean Markdown. Your saved reading stays local and yours.</p>
+            <div id="install" class="mt-8 flex flex-wrap gap-3" aria-label="Extension availability">
+              <a data-store="chrome" class="rounded-full bg-moss px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-moss/90" aria-disabled="true">Chrome — coming soon</a>
+              <a data-store="firefox" class="rounded-full border border-ink/15 bg-white px-5 py-3 text-sm font-semibold text-ink shadow-sm transition hover:border-moss hover:text-moss" aria-disabled="true">Firefox — coming soon</a>
+            </div>
+            <p class="mt-4 text-sm text-ink/55">Chrome and Firefox are coming first. No account. No tracking.</p>
+          </div>
+          <div class="rounded-[2rem] border border-white/80 bg-white/65 p-5 shadow-2xl shadow-moss/10 backdrop-blur sm:p-8">
+            <div class="rounded-2xl bg-ink p-6 text-paper shadow-inner sm:p-8">
+              <div class="flex items-center justify-between border-b border-paper/15 pb-5 text-sm text-paper/60"><span>arthur</span><span>Saved locally</span></div>
+              <p class="mt-8 text-xs font-semibold uppercase tracking-[0.18em] text-[#9ed4ad]">Reading note</p>
+              <p class="mt-3 text-2xl font-medium leading-tight">A calmer place for the ideas worth returning to.</p>
+              <div class="mt-8 rounded-xl bg-white/8 p-4 text-sm leading-6 text-paper/70">Clean article Markdown<br>Local attachments when enabled<br>Source link retained</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="border-y border-ink/10 bg-white/55 px-6 py-20 lg:px-8">
+        <div class="mx-auto max-w-6xl">
+          <p class="text-sm font-semibold uppercase tracking-[0.16em] text-moss">Choose your save path</p>
+          <div class="mt-6 grid gap-5 lg:grid-cols-2">
+            <article class="rounded-3xl border border-ink/10 bg-paper p-8"><p class="text-sm font-semibold text-moss">Extension only</p><h2 class="mt-3 text-3xl font-semibold tracking-tight">Download Markdown</h2><p class="mt-4 leading-7 text-ink/70">Works with the extension alone. Your browser downloads the saved article as Markdown; media stays as remote links.</p></article>
+            <article class="rounded-3xl bg-moss p-8 text-white shadow-lg shadow-moss/20"><p class="text-sm font-semibold text-white/70">Optional macOS helper</p><h2 class="mt-3 text-3xl font-semibold tracking-tight">Save straight to your vault</h2><p class="mt-4 leading-7 text-white/80">Arthur writes Markdown and browser-retrievable attachments to the folder you choose. The helper is optional and activated only when you install it.</p></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="mx-auto max-w-6xl px-6 py-20 lg:px-8">
+        <p class="text-sm font-semibold uppercase tracking-[0.16em] text-moss">Simple by design</p>
+        <div class="mt-8 grid gap-8 md:grid-cols-3">
+          <article><p class="text-5xl font-semibold text-moss/25">01</p><h2 class="mt-4 text-xl font-semibold">Install Arthur</h2><p class="mt-3 leading-7 text-ink/70">Add it from your browser’s extension marketplace when the listing is available.</p></article>
+          <article><p class="text-5xl font-semibold text-moss/25">02</p><h2 class="mt-4 text-xl font-semibold">Choose your destination</h2><p class="mt-3 leading-7 text-ink/70">Optionally connect a local folder on your Mac for direct saves.</p></article>
+          <article><p class="text-5xl font-semibold text-moss/25">03</p><h2 class="mt-4 text-xl font-semibold">Save from the toolbar</h2><p class="mt-3 leading-7 text-ink/70">Arthur acts only when you choose to save the active article.</p></article>
+        </div>
+      </section>
+
+      <section id="helper" class="bg-ink px-6 py-20 text-paper lg:px-8">
+        <div class="mx-auto grid max-w-6xl gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
+          <div><p class="text-sm font-semibold uppercase tracking-[0.16em] text-[#9ed4ad]">Optional helper</p><h2 class="mt-4 text-4xl font-semibold tracking-tight">Direct local saves, when you want them.</h2><p class="mt-5 leading-7 text-paper/70">The macOS helper is open source, has no elevated privileges or self-update path, and installs only Arthur’s helper plus its browser manifests. If it is absent or unavailable, Arthur downloads Markdown instead.</p></div>
+          <div class="rounded-2xl border border-paper/15 bg-white/7 p-5">
+            <div class="flex items-center justify-between gap-4"><p class="font-semibold">Developer installation</p><button data-copy-command="#source-install" class="rounded-full bg-paper px-4 py-2 text-sm font-semibold text-ink hover:bg-white">Copy</button></div>
+            <pre class="mt-5 overflow-x-auto rounded-xl bg-black/25 p-4 text-sm leading-7 text-[#d7f1db]"><code id="source-install">git clone https://github.com/olhapi/arthur.git
+cd arthur
+corepack pnpm install --frozen-lockfile
+pnpm native:install</code></pre>
+            <p class="mt-4 text-sm text-paper/65">Requires macOS, Node 22+, pnpm, and the repository’s documented Rust toolchain. <a class="underline underline-offset-4 hover:text-white" href="https://github.com/olhapi/arthur">View installer source</a>.</p>
+            <p data-copy-status class="mt-3 min-h-5 text-sm text-[#9ed4ad]" aria-live="polite"></p>
+            <p class="mt-5 border-t border-paper/15 pt-5 text-sm text-paper/65">Remove only Arthur’s helper and manifests: <code class="rounded bg-white/10 px-1.5 py-1 text-paper">pnpm native:uninstall</code></p>
+          </div>
+        </div>
+      </section>
+
+      <section id="permissions" class="mx-auto max-w-6xl px-6 py-20 lg:px-8">
+        <p class="text-sm font-semibold uppercase tracking-[0.16em] text-moss">Permissions, explained</p>
+        <h2 class="mt-4 max-w-2xl text-4xl font-semibold tracking-tight">Only what saving needs.</h2>
+        <div class="mt-8 overflow-hidden rounded-2xl border border-ink/10 bg-white"><table class="w-full text-left text-sm"><thead class="bg-ink text-paper"><tr><th class="px-5 py-4 font-semibold">Permission</th><th class="px-5 py-4 font-semibold">Why Arthur needs it</th></tr></thead><tbody class="divide-y divide-ink/10 text-ink/75"><tr><td class="px-5 py-4 font-mono text-xs">activeTab</td><td class="px-5 py-4">Read the tab only after you click Arthur to save it.</td></tr><tr><td class="px-5 py-4 font-mono text-xs">storage</td><td class="px-5 py-4">Keep your local Arthur preferences.</td></tr><tr><td class="px-5 py-4 font-mono text-xs">HTTP(S) host access</td><td class="px-5 py-4">Read the selected article and browser-retrievable resources needed to preserve it.</td></tr><tr><td class="px-5 py-4 font-mono text-xs">nativeMessaging</td><td class="px-5 py-4">Communicate with the separately installed optional helper for direct local saves.</td></tr><tr><td class="px-5 py-4 font-mono text-xs">downloads</td><td class="px-5 py-4">Download Markdown when the helper is not installed or unavailable.</td></tr></tbody></table></div>
+      </section>
+
+      <section id="privacy" class="bg-[#dfeee0] px-6 py-20 lg:px-8"><div class="mx-auto max-w-6xl"><p class="text-sm font-semibold uppercase tracking-[0.16em] text-moss">Privacy</p><h2 class="mt-4 max-w-2xl text-4xl font-semibold tracking-tight">Your reading does not become our data.</h2><p class="mt-5 max-w-2xl leading-7 text-ink/70">Arthur has no account, analytics, advertising, telemetry, or remote backend. Article content and the files you save remain on your device. The helper receives article content only while you trigger a direct save.</p><a class="mt-6 inline-flex font-semibold text-moss underline underline-offset-4" href="./privacy/">Read the complete privacy policy</a></div></section>
+    </main>
+
+    <footer id="support" class="mx-auto flex max-w-6xl flex-col gap-5 px-6 py-10 text-sm text-ink/65 sm:flex-row sm:items-center sm:justify-between lg:px-8"><p>Arthur is independent, local-first software.</p><nav class="flex flex-wrap gap-x-5 gap-y-2"><a class="underline underline-offset-4 hover:text-moss" href="mailto:oleh@olhapi.com">Email support</a><a class="underline underline-offset-4 hover:text-moss" href="https://github.com/olhapi/arthur/issues">GitHub Issues</a><a class="underline underline-offset-4 hover:text-moss" href="https://github.com/olhapi/arthur">Source</a><a class="underline underline-offset-4 hover:text-moss" href="https://github.com/olhapi/arthur/blob/main/LICENSE">MIT License</a></nav></footer>
+  </body>
+</html>

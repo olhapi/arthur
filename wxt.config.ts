@@ -32,11 +32,13 @@ export default defineConfig({
       }
     },
   },
-  manifest: ({ browser }) => ({
-    ...(browser === "firefox" ? {} : { key: CHROMIUM_PUBLIC_KEY_DER_BASE64 }),
+  manifest: ({ browser, mode }) => ({
+    // The fixed key keeps local Chromium builds aligned with the native host.
+    // Chrome Web Store packages must omit it; the store assigns their identity.
+    ...(browser === "firefox" || mode === "store" ? {} : { key: CHROMIUM_PUBLIC_KEY_DER_BASE64 }),
     icons: ICONS,
     action: { default_icon: ICONS },
-    permissions: ["activeTab", "storage", "nativeMessaging"],
+    permissions: ["activeTab", "storage", "nativeMessaging", "downloads"],
     host_permissions: ["http://*/*", "https://*/*"],
     browser_specific_settings: {
       gecko: {

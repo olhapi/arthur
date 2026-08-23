@@ -2,6 +2,13 @@
 
 Arthur is a macOS-first browser extension for saving the rendered article in the active tab to an Obsidian-style folder. It supports Chrome, Edge, and Firefox. A toolbar click extracts clean Markdown and preserves browser-retrievable GIF, animated WebP, SVG, AVIF, image, direct audio, and direct video bytes.
 
+## Marketplace site
+
+The public marketplace site is a static Tailwind build in `site/source`. Build
+and validate it locally with `pnpm site:verify`. The published site provides
+the privacy policy, support route, marketplace links once available, and the
+optional native-helper installation guidance.
+
 ## Requirements and roles
 
 Arthur v1 needs macOS for native-host installation. Development needs Node 22+ and pnpm 10.32.1 for WXT, TypeScript, tests, packaging, and the installer commands. Native development needs Rust 1.97.1.
@@ -37,6 +44,8 @@ Clippings/
 ```
 
 Notes have only `title` and normalized `source` frontmatter. A matching normalized source replaces its old note in place; a same-title different source receives a suffix. Local media uses `![[attachments/name]]`. Iframes, streaming manifests, failed retrievals, and oversized media remain remote links and produce a warning. Limits are 100 MiB per image, 2 GiB per direct audio/video item, 4 GiB total media, 4,096 media items, and 10 MiB UTF-16 Markdown.
+
+If the native helper is not installed or disconnects before a save starts, Arthur downloads the extracted article as Markdown instead. This fallback includes the article frontmatter and leaves media as remote links; it does not write to the configured vault or download attachments.
 
 ## Release gates and packaging
 

@@ -67,6 +67,7 @@ pub(super) struct Slot {
     owner: File,
     journal_a: File,
     journal_b: File,
+    journal_copies_valid: bool,
     new_note: Option<File>,
     pub old_backup: File,
     pub media: BTreeMap<usize, File>,
@@ -406,6 +407,7 @@ fn initialize_slot(
         owner,
         journal_a,
         journal_b,
+        journal_copies_valid: true,
         new_note: Some(new_note),
         old_backup,
         media,
@@ -477,6 +479,7 @@ fn open_slot(
     {
         return Err(VaultError::UnsafeChild);
     }
+    let journal_copies_valid = valid.len() == 2;
     let journal = valid
         .into_iter()
         .map(|(_, journal)| journal)
@@ -511,6 +514,7 @@ fn open_slot(
         owner,
         journal_a,
         journal_b,
+        journal_copies_valid,
         new_note,
         old_backup,
         media,
@@ -519,9 +523,6 @@ fn open_slot(
         #[cfg(test)]
         fail_next_reset: false,
     };
-    if !slot.inspect_authority(destination)? {
-        return Err(VaultError::UnsafeChild);
-    }
     Ok(slot)
 }
 
@@ -555,12 +556,19 @@ impl Workspace {
         // are never mutated. Valid slots remain usable after the complete
         // inspection pass.
         let mut inspected = Vec::with_capacity(SLOT_COUNT);
+        let mut idle_rebinds = Vec::with_capacity(SLOT_COUNT);
         for index in 0..SLOT_COUNT {
             match open_slot(&directory, &owner, destination, index) {
-                Ok(slot) => inspected.push(slot),
+                Ok(slot) if slot.inspect_authority(destination)? => inspected.push(slot),
+                Ok(slot) if slot.can_rebind_empty_scratch()? => idle_rebinds.push(slot),
+                Ok(_) => {}
                 Err(VaultError::UnsafeChild) => {}
                 Err(error) => return Err(error),
             }
+        }
+        for mut slot in idle_rebinds {
+            slot.rebind_empty_scratch()?;
+            inspected.push(slot);
         }
         let slots = inspected
             .into_iter()
@@ -768,6 +776,20 @@ impl Slot {
             && self.fixed_paths_match(allows_missing_new_note)?
             && self.journal_fixed_authority_matches()?
             && self.recovery_states_are_authoritative(destination))
+    }
+
+    fn can_rebind_empty_scratch(&self) -> Result<bool, VaultError> {
+        Ok(self.journal_copies_valid
+            && self.journal.phase == JournalPhase::Empty
+            && valid_journal_semantics(&self.journal)
+            && self.fixed_paths_match(false)?)
+    }
+
+    fn rebind_empty_scratch(&mut self) -> Result<(), VaultError> {
+        if !self.can_rebind_empty_scratch()? {
+            return Err(VaultError::UnsafeChild);
+        }
+        self.persist(JournalPhase::Empty, None, None, None, None)
     }
 
     fn recover(&mut self, destination: &OwnedFd) -> Result<(), VaultError> {
@@ -1157,7 +1179,7 @@ mod tests {
     use std::{
         fs as stdfs,
         os::unix::fs::MetadataExt,
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -1187,6 +1209,12 @@ mod tests {
         INJECTED_SLOT_INSPECTION_ERROR.with(|injected| {
             assert!(injected.replace(Some((index, error))).is_none());
         });
+    }
+
+    fn replace_regular_file(path: &Path) {
+        let replacement = path.with_extension("replaced");
+        stdfs::write(&replacement, stdfs::read(path).unwrap()).unwrap();
+        stdfs::rename(replacement, path).unwrap();
     }
 
     #[test]
@@ -1546,6 +1574,59 @@ mod tests {
             assert_eq!(stdfs::read(slot.join(JOURNAL_A)).unwrap(), b"bad-a");
             assert_eq!(stdfs::read(slot.join(JOURNAL_B)).unwrap(), b"bad-b");
         }
+        stdfs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn empty_slots_rebind_after_their_scratch_files_receive_new_inodes() {
+        let path = temp();
+        let destination = fs::open_destination(&path).unwrap();
+        drop(Workspace::open(&destination).unwrap());
+        drop(destination);
+
+        for index in 0..SLOT_COUNT {
+            let slot = path.join(WORKSPACE_NAME).join(slot_name(index));
+            for name in [WORKSPACE_OWNER, JOURNAL_A, JOURNAL_B, NEW_NOTE, OLD_BACKUP] {
+                replace_regular_file(&slot.join(name));
+            }
+        }
+
+        let destination = fs::open_destination(&path).unwrap();
+        let slot = Workspace::open(&destination).unwrap().claim().unwrap();
+        assert_eq!(slot.index(), 0);
+        drop(slot);
+        let slot = Workspace::open(&destination).unwrap().claim().unwrap();
+        assert_eq!(slot.index(), 0);
+        drop(slot);
+        drop(destination);
+        stdfs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn preparing_slot_with_recreated_scratch_files_stays_quarantined() {
+        let path = temp();
+        let destination = fs::open_destination(&path).unwrap();
+        let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
+        slot.begin().unwrap();
+        slot.write_new_note(b"staged article").unwrap();
+        drop(slot);
+        drop(destination);
+
+        let slot_path = path.join(WORKSPACE_NAME).join(slot_name(0));
+        for name in [WORKSPACE_OWNER, JOURNAL_A, JOURNAL_B, NEW_NOTE, OLD_BACKUP] {
+            replace_regular_file(&slot_path.join(name));
+        }
+        let staged_before = stdfs::read(slot_path.join(NEW_NOTE)).unwrap();
+
+        let destination = fs::open_destination(&path).unwrap();
+        let next = Workspace::open(&destination).unwrap().claim().unwrap();
+        assert_eq!(next.index(), 1);
+        assert_eq!(
+            stdfs::read(slot_path.join(NEW_NOTE)).unwrap(),
+            staged_before
+        );
+        drop(next);
+        drop(destination);
         stdfs::remove_dir_all(path).unwrap();
     }
 
