@@ -10,6 +10,10 @@ class FakeStatusBrowser implements StatusBrowserAdapter {
     this.calls.push(`badge:${tabId}:${text}`);
   }
 
+  async setIcon({ tabId, path }: { tabId: number; path: Readonly<Record<number, string>> }): Promise<void> {
+    this.calls.push(`icon:${tabId}:${path[16]}`);
+  }
+
   async setPopup({ tabId, popup }: { tabId: number; popup: string }): Promise<void> {
     this.calls.push(`popup:${tabId}:${popup}`);
   }
@@ -25,6 +29,35 @@ class FakeStatusBrowser implements StatusBrowserAdapter {
 }
 
 describe("StatusController", () => {
+  it("renders each status as a full, tab-specific toolbar icon", async () => {
+    const browser = new FakeStatusBrowser();
+    const status = new StatusController(browser);
+
+    await status.ready(17);
+    await status.saving(17);
+    await status.success(17);
+    await status.warning(17, [{ code: "media_fallback", message: "The original link was retained." }]);
+    await status.error(17, { code: "commit_failed", message: "The article could not be committed." });
+
+    expect(browser.calls).toEqual([
+      "icon:17:icons/arthur-ready-16.png",
+      "popup:17:",
+      "clear:17",
+      "icon:17:icons/arthur-saving-16.png",
+      "popup:17:",
+      "clear:17",
+      "icon:17:icons/arthur-saved-16.png",
+      "popup:17:",
+      "clear:17",
+      "icon:17:icons/arthur-attention-16.png",
+      "local",
+      "popup:17:status.html?tabId=17",
+      "icon:17:icons/arthur-attention-16.png",
+      "local",
+      "popup:17:status.html?tabId=17",
+    ]);
+  });
+
   it("clears an old popup while saving and marks a successful save", async () => {
     const browser = new FakeStatusBrowser();
     const status = new StatusController(browser);
@@ -33,10 +66,10 @@ describe("StatusController", () => {
     await status.success(17);
 
     expect(browser.calls).toEqual([
-      "badge:17:…",
+      "icon:17:icons/arthur-saving-16.png",
       "popup:17:",
       "clear:17",
-      "badge:17:✓",
+      "icon:17:icons/arthur-saved-16.png",
       "popup:17:",
       "clear:17",
     ]);
@@ -51,10 +84,10 @@ describe("StatusController", () => {
     await status.error(17, { code: "commit_failed", message: "The article could not be committed." });
 
     expect(browser.calls).toEqual([
-      "badge:17:!",
+      "icon:17:icons/arthur-attention-16.png",
       "local",
       "popup:17:status.html?tabId=17",
-      "badge:17:!",
+      "icon:17:icons/arthur-attention-16.png",
       "local",
       "popup:17:status.html?tabId=17",
     ]);
@@ -73,9 +106,9 @@ describe("StatusController", () => {
     await expect(status.success(17)).resolves.toBeUndefined();
 
     expect(browser.calls).toEqual([
-      "badge:17:…",
+      "icon:17:icons/arthur-saving-16.png",
       "popup:17:",
-      "badge:17:✓",
+      "icon:17:icons/arthur-saved-16.png",
       "popup:17:",
     ]);
   });

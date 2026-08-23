@@ -18,6 +18,9 @@ const ICONS = {
   48: "icons/arthur-48.png",
   128: "icons/arthur-128.png",
 };
+const STATUS_ICONS = ["ready", "saving", "saved", "attention"].flatMap((status) =>
+  Object.keys(ICONS).map((size) => `icons/arthur-${status}-${size}.png`),
+);
 
 function fail(message) { throw new Error(message); }
 
@@ -87,6 +90,7 @@ export async function validateBuildArtifacts({ root = path.join(ROOT, ".output")
       assertFile(artifact, "options.html", `${target.name} options page`),
       assertFile(artifact, "status.html", `${target.name} status page`),
       ...Object.values(ICONS).map((file) => assertFile(artifact, file, `${target.name} icon ${file}`)),
+      ...STATUS_ICONS.map((file) => assertFile(artifact, file, `${target.name} status icon ${file}`)),
     ]);
     targets.push(target.name);
   }

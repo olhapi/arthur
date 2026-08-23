@@ -52,11 +52,11 @@ export type RetrySaveResult =
 
 export interface StatusBrowserFacade {
   action?: {
-    setBadgeText(details: { tabId: number; text: string }): Promise<void> | void;
+    setIcon(details: { tabId: number; path: Readonly<Record<number, string>> }): Promise<void> | void;
     setPopup(details: { tabId: number; popup: string }): Promise<void> | void;
   };
   browserAction?: {
-    setBadgeText(details: { tabId: number; text: string }): Promise<void> | void;
+    setIcon(details: { tabId: number; path: Readonly<Record<number, string>> }): Promise<void> | void;
     setPopup(details: { tabId: number; popup: string }): Promise<void> | void;
   };
   storage: {
@@ -71,7 +71,7 @@ export function createStatusBrowserAdapter(browser: StatusBrowserFacade): Status
   const action = browser.action ?? browser.browserAction;
   if (action === undefined) throw new Error("Arthur requires a browser action API.");
   return {
-    setBadgeText: (details) => action.setBadgeText(details),
+    setIcon: (details) => action.setIcon(details),
     setPopup: (details) => action.setPopup(details),
     setLocal: async (value) => {
       await browser.storage.local.set({ [statusStorageKey(value.tabId)]: value });
@@ -83,14 +83,24 @@ export function createStatusBrowserAdapter(browser: StatusBrowserFacade): Status
 }
 
 export interface StatusCleanupBrowser {
-  tabs: { onRemoved: { addListener(listener: (tabId: number) => void): void } };
+  tabs: {
+    onRemoved: { addListener(listener: (tabId: number) => void): void };
+    onUpdated: { addListener(listener: (tabId: number, changeInfo: { status?: string; url?: string }) => void): void };
+  };
   storage: { local: { remove(key: string): Promise<void> | void } };
 }
 
-export function registerStatusCleanup(browser: StatusCleanupBrowser): void {
+export function registerStatusCleanup(
+  browser: StatusCleanupBrowser,
+  status?: Pick<StatusController, "ready">,
+): void {
   void Promise.resolve(browser.storage.local.remove("status")).catch(() => undefined);
   browser.tabs.onRemoved.addListener((tabId) => {
     void Promise.resolve(browser.storage.local.remove(statusStorageKey(tabId))).catch(() => undefined);
+  });
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (status === undefined || (changeInfo.status !== "loading" && changeInfo.url === undefined)) return;
+    void status.ready(tabId).catch(() => undefined);
   });
 }
 
@@ -208,8 +218,7 @@ export function createBackgroundController(
   });
 }
 
-function createProductionCoordinator(): SaveCoordinator {
-  const status = new StatusController(createStatusBrowserAdapter(browser as unknown as StatusBrowserFacade));
+function createProductionCoordinator(status: StatusController): SaveCoordinator {
   return new SaveCoordinator({
     loadSettings: async () => (await browser.storage.local.get("settings")).settings,
     extract: async (tabId): Promise<ExtractedArticle> =>
@@ -223,6 +232,7 @@ function createProductionCoordinator(): SaveCoordinator {
 }
 
 export default defineBackground(() => {
-  registerStatusCleanup(browser as unknown as StatusCleanupBrowser);
-  createBackgroundController(browser as unknown as BackgroundBrowserFacade, createProductionCoordinator());
+  const status = new StatusController(createStatusBrowserAdapter(browser as unknown as StatusBrowserFacade));
+  registerStatusCleanup(browser as unknown as StatusCleanupBrowser, status);
+  createBackgroundController(browser as unknown as BackgroundBrowserFacade, createProductionCoordinator(status));
 });

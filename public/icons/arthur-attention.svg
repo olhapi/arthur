@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Arthur needs attention">
+  <rect x="14" y="14" width="100" height="100" rx="28" fill="#E29B18"/>
+  <path d="M64 33 99 94H29L64 33Z" fill="#FFF"/>
+  <path d="M64 55v20M64 84v1" fill="none" stroke="#8A5700" stroke-width="9" stroke-linecap="round"/>
+</svg>

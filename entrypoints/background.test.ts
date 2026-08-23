@@ -219,23 +219,39 @@ describe("createBackgroundController", () => {
 });
 
 describe("per-tab status storage", () => {
+  it("resets a tab to its ready icon when navigation starts", async () => {
+    let onUpdated: ((tabId: number, changeInfo: { status?: string; url?: string }) => void) | undefined;
+    const ready = vi.fn().mockResolvedValue(undefined);
+    registerStatusCleanup({
+      tabs: {
+        onRemoved: { addListener: vi.fn() },
+        onUpdated: { addListener(listener: (tabId: number, changeInfo: { status?: string; url?: string }) => void) { onUpdated = listener; } },
+      },
+      storage: { local: { remove: vi.fn() } },
+    }, { ready });
+
+    onUpdated?.(41, { status: "loading", url: "https://example.test/next" });
+
+    await vi.waitFor(() => expect(ready).toHaveBeenCalledWith(41));
+  });
+
   it("uses Firefox MV2's browserAction API for status UI", async () => {
-    const browserAction = { setBadgeText: vi.fn(), setPopup: vi.fn() };
+    const browserAction = { setIcon: vi.fn(), setPopup: vi.fn() };
     const adapter = createStatusBrowserAdapter({
       browserAction,
       storage: { local: { set: vi.fn(), remove: vi.fn() } },
     });
 
-    await adapter.setBadgeText({ tabId: 41, text: "!" });
+    await adapter.setIcon({ tabId: 41, path: { 16: "icons/arthur-attention-16.png" } });
     await adapter.setPopup({ tabId: 41, popup: "status.html?tabId=41" });
 
-    expect(browserAction.setBadgeText).toHaveBeenCalledWith({ tabId: 41, text: "!" });
+    expect(browserAction.setIcon).toHaveBeenCalledWith({ tabId: 41, path: { 16: "icons/arthur-attention-16.png" } });
     expect(browserAction.setPopup).toHaveBeenCalledWith({ tabId: 41, popup: "status.html?tabId=41" });
   });
   it("writes independent keys for A and B instead of replacing one global record", async () => {
     const storage = { set: vi.fn().mockResolvedValue(undefined), remove: vi.fn().mockResolvedValue(undefined) };
     const adapter = createStatusBrowserAdapter({
-      action: { setBadgeText: vi.fn(), setPopup: vi.fn() },
+      action: { setIcon: vi.fn(), setPopup: vi.fn() },
       storage: { local: storage },
     });
     const status = new StatusController(adapter);
@@ -255,7 +271,10 @@ describe("per-tab status storage", () => {
     let onRemoved: ((tabId: number) => void) | undefined;
     const remove = vi.fn().mockResolvedValue(undefined);
     registerStatusCleanup({
-      tabs: { onRemoved: { addListener(listener: (tabId: number) => void) { onRemoved = listener; } } },
+      tabs: {
+        onRemoved: { addListener(listener: (tabId: number) => void) { onRemoved = listener; } },
+        onUpdated: { addListener: vi.fn() },
+      },
       storage: { local: { remove } },
     });
 

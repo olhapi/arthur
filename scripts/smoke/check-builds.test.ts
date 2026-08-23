@@ -12,8 +12,14 @@ const ICONS = {
   48: "icons/arthur-48.png",
   128: "icons/arthur-128.png",
 };
+const STATUS_ICONS = ["ready", "saving", "saved", "attention"].flatMap((status) =>
+  Object.keys(ICONS).map((size) => `icons/arthur-${status}-${size}.png`),
+);
 
-async function buildFixture(mutator?: (target: string, manifest: Record<string, any>) => void) {
+async function buildFixture(
+  mutator?: (target: string, manifest: Record<string, any>) => void,
+  { includeStatusIcons = true } = {},
+) {
   const root = await mkdtemp(path.join(tmpdir(), "arthur-build-smoke-"));
   for (const target of [
     { name: "chrome", directory: "chrome-mv3", manifestVersion: 3 },
@@ -38,7 +44,10 @@ async function buildFixture(mutator?: (target: string, manifest: Record<string, 
     };
     mutator?.(target.name, manifest);
     await writeFile(path.join(artifact, "manifest.json"), JSON.stringify(manifest));
-    for (const relative of ["background.js", "content-scripts/content.js", "options.html", "status.html", ...Object.values(ICONS)]) {
+    for (const relative of [
+      "background.js", "content-scripts/content.js", "options.html", "status.html", ...Object.values(ICONS),
+      ...(includeStatusIcons ? STATUS_ICONS : []),
+    ]) {
       await mkdir(path.dirname(path.join(artifact, relative)), { recursive: true });
       await writeFile(path.join(artifact, relative), "fixture");
     }
@@ -69,5 +78,10 @@ describe("check-builds", () => {
       if (target === "firefox") delete manifest.browser_action.default_icon;
     });
     await expect(validateBuildArtifacts({ root })).rejects.toThrow(/icon/i);
+  });
+
+  it("rejects a build that omits a dynamic toolbar-status icon", async () => {
+    const root = await buildFixture(undefined, { includeStatusIcons: false });
+    await expect(validateBuildArtifacts({ root })).rejects.toThrow(/missing|ENOENT/i);
   });
 });
