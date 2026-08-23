@@ -20,6 +20,10 @@ display an Edge install button, claim Edge marketplace availability, add
 accounts, analytics, telemetry, advertising, a remote backend, or automated
 updates.
 
+Arthur is distributed under the MIT License. The repository `LICENSE` file is
+the canonical license text; the public site and marketplace listings link to
+that file rather than duplicating it.
+
 The design includes:
 
 - a static GitHub Pages site at `https://olhapi.github.io/arthur/`;
