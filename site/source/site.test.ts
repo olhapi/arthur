@@ -27,6 +27,26 @@ describe("renderAvailability", () => {
     expect(link?.getAttribute("target")).toBe("_blank");
     expect(link?.textContent).toBe("Install for Firefox");
   });
+
+  it("renders the published Chrome and Firefox marketplace URLs", async () => {
+    document.body.innerHTML = [
+      '<a data-store="chrome">Install for Chrome</a>',
+      '<a data-store="firefox">Install for Firefox</a>',
+    ].join("");
+    const { SITE_CONFIG } = await import("./site-config.js");
+
+    renderAvailability(SITE_CONFIG, document);
+
+    expect(document.querySelector("[data-store=chrome]")?.getAttribute("href")).toBe(
+      "https://chromewebstore.google.com/detail/arthur-%E2%80%94-article-saver/bfcgihgadankhhijhhdlkekecfmbihef?authuser=0&hl=en",
+    );
+    expect(document.querySelector("[data-store=firefox]")?.getAttribute("href")).toBe(
+      "https://addons.mozilla.org/en-US/firefox/addon/arthur-article-saver/",
+    );
+    expect(document.querySelector("[data-store=chrome]")?.textContent).toBe("Install for Chrome");
+    expect(document.querySelector("[data-store=firefox]")?.textContent).toBe("Install for Firefox");
+    expect(document.querySelector("[aria-disabled]")).toBeNull();
+  });
 });
 
 describe("copyInstallCommand", () => {
