@@ -1,10 +1,11 @@
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { CHROMIUM_PUBLIC_KEY_DER_BASE64 } from "../native-host/identity.mjs";
-import { validateBuildArtifacts, validateChromeStoreBuild } from "./check-builds.mjs";
+import { validateBuildArtifacts, validateChromeStoreBuild, validateStoreZipArtifacts } from "./check-builds.mjs";
 
 const ICONS = {
   16: "icons/arthur-16.png",
@@ -30,8 +31,10 @@ async function buildFixture(
     await mkdir(path.join(artifact, "content-scripts"), { recursive: true });
     const manifest: Record<string, any> = {
       manifest_version: target.manifestVersion,
-      name: "arthur",
-      version: "0.1.0",
+      name: "Arthur — Article Saver",
+      version: "0.1.1",
+      description: "Save the rendered article you are reading as clean, local Markdown.",
+      homepage_url: "https://olhapi.github.io/arthur/",
       permissions: target.manifestVersion === 3
         ? ["activeTab", "storage", "nativeMessaging", "downloads"]
         : ["activeTab", "storage", "nativeMessaging", "downloads", "http://*/*", "https://*/*"],
@@ -61,8 +64,10 @@ async function buildChromeStoreFixture({ includeKey = false } = {}) {
   await mkdir(path.join(artifact, "content-scripts"), { recursive: true });
   await writeFile(path.join(artifact, "manifest.json"), JSON.stringify({
     manifest_version: 3,
-    name: "arthur",
-    version: "0.1.0",
+    name: "Arthur — Article Saver",
+    version: "0.1.1",
+    description: "Save the rendered article you are reading as clean, local Markdown.",
+    homepage_url: "https://olhapi.github.io/arthur/",
     permissions: ["activeTab", "storage", "nativeMessaging", "downloads"],
     host_permissions: ["http://*/*", "https://*/*"],
     browser_specific_settings: { gecko: { id: "arthur@olhapi.com" } },
@@ -80,7 +85,52 @@ async function buildChromeStoreFixture({ includeKey = false } = {}) {
   return root;
 }
 
+async function buildStoreZipFixture(mutator?: (target: string, manifest: Record<string, any>) => void) {
+  const chromeRoot = await buildChromeStoreFixture();
+  const browserRoot = await buildFixture(mutator);
+  const root = await mkdtemp(path.join(tmpdir(), "arthur-store-zips-"));
+  const packagePath = path.join(root, "package.json");
+  await writeFile(packagePath, JSON.stringify({ version: "0.1.1" }));
+  const archives: Array<readonly [string, string]> = [
+    [path.join(chromeRoot, "chrome-mv3-store"), "arthur-0.1.1-chrome-store.zip"],
+    [path.join(browserRoot, "firefox-mv2"), "arthur-0.1.1-firefox.zip"],
+  ];
+  for (const [directory, name] of archives) {
+    const zip = spawnSync("/usr/bin/zip", ["-qr", path.join(root, name), "."], { cwd: directory });
+    expect(zip.status).toBe(0);
+  }
+  return { root, packagePath };
+}
+
 describe("check-builds", () => {
+  it("derives the expected manifest version from the release package", async () => {
+    const root = await buildFixture((_target, manifest) => { manifest.version = "0.2.0"; });
+    const packagePath = path.join(await mkdtemp(path.join(tmpdir(), "arthur-release-package-")), "package.json");
+    await writeFile(packagePath, JSON.stringify({ version: "0.2.0" }));
+
+    await expect(validateBuildArtifacts({ root, packagePath })).resolves.toMatchObject({
+      targets: ["chrome", "edge", "firefox"],
+    });
+  });
+
+  it("requires Arthur's public marketplace identity instead of package defaults", async () => {
+    const publicMetadata = await buildFixture((_target, manifest) => {
+      manifest.name = "Arthur — Article Saver";
+      manifest.version = "0.1.1";
+      manifest.description = "Save the rendered article you are reading as clean, local Markdown.";
+      manifest.homepage_url = "https://olhapi.github.io/arthur/";
+    });
+    await expect(validateBuildArtifacts({ root: publicMetadata })).resolves.toMatchObject({ targets: ["chrome", "edge", "firefox"] });
+
+    const packageDefaults = await buildFixture((_target, manifest) => {
+      manifest.name = "arthur";
+      manifest.version = "0.1.0";
+      delete manifest.description;
+      delete manifest.homepage_url;
+    });
+    await expect(validateBuildArtifacts({ root: packageDefaults })).rejects.toThrow(/identity|description|homepage/i);
+  });
+
   it("rejects a Chromium manifest without Arthur's committed key", async () => {
     const root = await buildFixture((target, manifest) => { if (target === "chrome") delete manifest.key; });
     await expect(validateBuildArtifacts({ root })).rejects.toThrow(/key|identity/i);
@@ -113,5 +163,22 @@ describe("check-builds", () => {
   it("rejects a Chrome Web Store build that contains a fixed development key", async () => {
     const root = await buildChromeStoreFixture({ includeKey: true });
     await expect(validateChromeStoreBuild({ root })).rejects.toThrow(/key/i);
+  });
+
+  it("validates the exact Chrome and Firefox upload archives", async () => {
+    const fixture = await buildStoreZipFixture();
+    await expect(validateStoreZipArtifacts(fixture)).resolves.toMatchObject({
+      storeArchives: [
+        { name: "arthur-0.1.1-chrome-store.zip", target: "chrome" },
+        { name: "arthur-0.1.1-firefox.zip", target: "firefox" },
+      ],
+    });
+  });
+
+  it("rejects a Firefox upload archive built for a different version", async () => {
+    const fixture = await buildStoreZipFixture((target, manifest) => {
+      if (target === "firefox") manifest.version = "0.1.0";
+    });
+    await expect(validateStoreZipArtifacts(fixture)).rejects.toThrow(/Firefox.*identity|identity.*Firefox/i);
   });
 });

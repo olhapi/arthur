@@ -7,6 +7,19 @@ import { describe, expect, it } from "vitest";
 import { validateSourceArchives } from "./check-zips.mjs";
 
 describe("source archive inventory", () => {
+  it("validates the requested release source archive when prior versions remain", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "arthur-versioned-source-zip-"));
+    await writeFile(path.join(root, "README.md"), "source");
+    for (const version of ["0.1.0", "0.1.1"]) {
+      const archive = path.join(root, `arthur-${version}-sources.zip`);
+      const zip = spawnSync("/usr/bin/zip", ["-q", archive, "README.md"], { cwd: root });
+      expect(zip.status).toBe(0);
+    }
+    await expect(validateSourceArchives({ root, archive: "arthur-0.1.1-sources.zip" })).resolves.toMatchObject({
+      sourceArchives: [{ name: "arthur-0.1.1-sources.zip" }],
+    });
+  });
+
   it("rejects native targets, dependencies, build outputs, and caches", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "arthur-source-zip-"));
     await mkdir(path.join(root, "native/target"), { recursive: true });

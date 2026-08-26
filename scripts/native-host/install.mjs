@@ -4,7 +4,7 @@ import * as nodeFs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { CHROMIUM_EXTENSION_ID } from "./identity.mjs";
+import { CHROME_WEB_STORE_EXTENSION_ID, CHROMIUM_EXTENSION_ID } from "./identity.mjs";
 
 export const NATIVE_HOST_NAME = "com.olhapi.arthur";
 export const FIREFOX_EXTENSION_ID = "arthur@olhapi.com";
@@ -70,7 +70,13 @@ function manifest(pathname, browser) {
   const base = { name: NATIVE_HOST_NAME, description: "Arthur native host", path: pathname, type: "stdio" };
   return browser === "firefox"
     ? { ...base, allowed_extensions: [FIREFOX_EXTENSION_ID] }
-    : { ...base, allowed_origins: [`chrome-extension://${CHROMIUM_EXTENSION_ID}/`] };
+    : {
+      ...base,
+      allowed_origins: [
+        `chrome-extension://${CHROMIUM_EXTENSION_ID}/`,
+        `chrome-extension://${CHROME_WEB_STORE_EXTENSION_ID}/`,
+      ],
+    };
 }
 
 function missing(error) {

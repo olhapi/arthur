@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { FIREFOX_EXTENSION_ID, NATIVE_HOST_NAME, assertRegularNonSymlink, canonicalizeHome, nativeHostTargets, validateDirectoryChain } from "./install.mjs";
-import { CHROMIUM_EXTENSION_ID } from "./identity.mjs";
+import { CHROME_WEB_STORE_EXTENSION_ID, CHROMIUM_EXTENSION_ID } from "./identity.mjs";
 
 const MINIMAL_ENV = { PATH: "/usr/bin:/bin" };
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -17,7 +17,13 @@ function expectedManifest(binary, browser) {
   const base = { name: NATIVE_HOST_NAME, description: "Arthur native host", path: binary, type: "stdio" };
   return browser === "firefox"
     ? { ...base, allowed_extensions: [FIREFOX_EXTENSION_ID] }
-    : { ...base, allowed_origins: [`chrome-extension://${CHROMIUM_EXTENSION_ID}/`] };
+    : {
+      ...base,
+      allowed_origins: [
+        `chrome-extension://${CHROMIUM_EXTENSION_ID}/`,
+        `chrome-extension://${CHROME_WEB_STORE_EXTENSION_ID}/`,
+      ],
+    };
 }
 
 function exactJson(actual, expected, label) {

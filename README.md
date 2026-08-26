@@ -58,6 +58,10 @@ pnpm zip
 
 `pnpm zip` creates Chrome, Edge, and Firefox archives, then rejects a WXT source archive above 10 MiB or 500 entries and rejects native targets, dependencies, build outputs, and caches. See [docs/acceptance.md](docs/acceptance.md) for exact automated and manual evidence.
 
+Store updates are published from exact version tags by the SHA-pinned GitHub
+Actions workflow. See [docs/marketplace-listing.md](docs/marketplace-listing.md#automatic-store-updates)
+for required secrets, the local authentication dry run, and the tag procedure.
+
 To remove only Arthur-owned host files:
 
 ```sh

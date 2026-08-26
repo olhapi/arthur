@@ -8,6 +8,9 @@ const ICONS = {
   48: "icons/arthur-48.png",
   128: "icons/arthur-128.png",
 };
+const EXTENSION_NAME = "Arthur — Article Saver";
+const EXTENSION_DESCRIPTION = "Save the rendered article you are reading as clean, local Markdown.";
+const HOMEPAGE_URL = "https://olhapi.github.io/arthur/";
 
 export default defineConfig({
   zip: {
@@ -36,6 +39,9 @@ export default defineConfig({
     // The fixed key keeps local Chromium builds aligned with the native host.
     // Chrome Web Store packages must omit it; the store assigns their identity.
     ...(browser === "firefox" || mode === "store" ? {} : { key: CHROMIUM_PUBLIC_KEY_DER_BASE64 }),
+    name: EXTENSION_NAME,
+    description: EXTENSION_DESCRIPTION,
+    homepage_url: HOMEPAGE_URL,
     icons: ICONS,
     action: { default_icon: ICONS },
     permissions: ["activeTab", "storage", "nativeMessaging", "downloads"],

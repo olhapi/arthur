@@ -15,8 +15,10 @@ function entries(archive) {
     .split("\n").filter(Boolean).map((entry) => entry.replaceAll("\\", "/"));
 }
 
-export async function validateSourceArchives({ root = path.join(ROOT, ".output") } = {}) {
-  const archives = (await fs.readdir(root)).filter((name) => name.endsWith("-sources.zip")).sort();
+export async function validateSourceArchives({ root = path.join(ROOT, ".output"), archive } = {}) {
+  const archives = archive === undefined
+    ? (await fs.readdir(root)).filter((name) => name.endsWith("-sources.zip")).sort()
+    : [archive];
   if (archives.length !== 1) throw new Error("Expected exactly one bounded WXT source archive.");
   const results = [];
   for (const name of archives) {
@@ -31,5 +33,11 @@ export async function validateSourceArchives({ root = path.join(ROOT, ".output")
   return { sourceArchives: results };
 }
 
-async function main() { process.stdout.write(`${JSON.stringify(await validateSourceArchives())}\n`); }
+function parseArguments(argv) {
+  if (argv.length === 0) return {};
+  if (argv.length === 2 && argv[0] === "--archive" && /^[A-Za-z0-9._-]+-sources\.zip$/.test(argv[1])) return { archive: argv[1] };
+  throw new Error("Usage: check-zips.mjs [--archive arthur-version-sources.zip]");
+}
+
+async function main() { process.stdout.write(`${JSON.stringify(await validateSourceArchives(parseArguments(process.argv.slice(2))))}\n`); }
 if (process.argv[1] === fileURLToPath(import.meta.url)) main().catch((error) => { process.stderr.write(`Arthur source archive check failed: ${error.message}\n`); process.exitCode = 1; });

@@ -4,16 +4,17 @@
 
 - Website: `https://olhapi.github.io/arthur/`
 - Privacy policy: `https://olhapi.github.io/arthur/privacy/`
+- Chrome Web Store: `https://chromewebstore.google.com/detail/arthur-%E2%80%94-article-saver/bfcgihgadankhhijhhdlkekecfmbihef`
+- Firefox Browser Add-ons: `https://addons.mozilla.org/en-US/firefox/addon/arthur-article-saver/`
 - Support: `oleh@olhapi.com` and `https://github.com/olhapi/arthur/issues`
 - Source: `https://github.com/olhapi/arthur`
 - License: MIT
 
-Do not add a Chrome or Firefox store URL to the website until that exact listing
-has been published. The public configuration lives in `site/source/site-config.js`.
+The public store-link configuration lives in `site/source/site-config.js`.
 
 ## Listing copy
 
-**Name:** Arthur
+**Name:** Arthur — Article Saver
 
 **Short description:** Save the rendered article you are reading as clean,
 local Markdown.
@@ -54,10 +55,47 @@ the public Pages URL above.
 
 ## Submission checklist
 
-- [ ] Configure the real Chrome Web Store URL in `SITE_CONFIG.stores.chrome`.
-- [ ] Configure the real AMO URL in `SITE_CONFIG.stores.firefox`.
+- [x] Configure the real Chrome Web Store URL in `SITE_CONFIG.stores.chrome`.
+- [x] Configure the real AMO URL in `SITE_CONFIG.stores.firefox`.
 - [ ] Capture the required marketplace screenshots from the released build.
 - [ ] Reconcile every listing claim against `wxt.config.ts` and this document.
 - [ ] Verify the published website and privacy-policy URLs.
 - [ ] Publish a signed/notarized macOS helper asset and SHA-256 before enabling
       any release-installer command.
+
+## Automatic store updates
+
+The `Publish browser stores` GitHub Actions workflow submits an existing
+`vMAJOR.MINOR.PATCH` tag to Chrome and Firefox. A pushed version tag starts it
+automatically; `workflow_dispatch` can retry an existing tag. The workflow
+checks out that tag, requires it to match `package.json` exactly, installs the
+locked dependency graph, runs the TypeScript tests and typecheck, builds the
+exact store archives, validates both upload ZIPs and the Firefox source archive,
+and then submits both stores. Chrome uses API v2 `DEFAULT_PUBLISH`, so an approved submission is
+published automatically. Firefox explicitly submits to its listed channel.
+
+Configure the `browser-stores` GitHub environment with these secrets:
+
+- `CHROME_PUBLISHER_ID`
+- `CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL`
+- `CHROME_SERVICE_ACCOUNT_PRIVATE_KEY`
+- `FIREFOX_JWT_ISSUER`
+- `FIREFOX_JWT_SECRET`
+
+The public Chrome and Firefox extension IDs are committed in the workflow and
+checked by `scripts/release/verify-release.mjs`. For a local credential check,
+copy `.env.submit.example` to ignored `.env.submit`, fill its placeholders, and
+run `pnpm release:stores:dry-run`. Do not tag until that dry run succeeds.
+
+Release a new version only after the full release gate passes:
+
+```sh
+pnpm verify
+pnpm release:stores:dry-run
+git tag -s vMAJOR.MINOR.PATCH
+git push origin vMAJOR.MINOR.PATCH
+```
+
+Never reuse or move a published version tag. The workflow will not submit
+version `0.1.1` merely because the workflow file is pushed; it runs only for a
+new matching tag or an explicit manual dispatch.

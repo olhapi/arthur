@@ -4,6 +4,7 @@ export const CHROMIUM_PUBLIC_KEY_DER_BASE64 =
   "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAthJlBMpMQ7riLovk+Bc98iJlz6Di/lpVUPBK2E75cG5yW9hVP/ttRd3MPVaM0m7tVnFZr3o4+NQ/18yPKdnvVkJ8EWv3E4HWRIZwyz5qd79iA18cIWcESKgSm9Dq8NuoMzhtx63K1Jcq6VDNeRHAfGY82kZUn36JGEhjBxLXap/mRvFDYVNuwfuAZ89A46g68momf1cBIw+3wS+V9Mff2zTEWkzw2Q+Dbmd+jc1wiK7ktxlSNQsf8+7pftZI7NhVg8ZuEMf2LPShhFb2iykuaXeeLiCrbMm20t8PFmddZVzNvy30Boc/Y7MqzKO3+mEpRQlbCFDG0QbnKm23GDVhswIDAQAB";
 
 export const CHROMIUM_EXTENSION_ID = "kaknffcpoififkcmhphedbajjbacfaof";
+export const CHROME_WEB_STORE_EXTENSION_ID = "bfcgihgadankhhijhhdlkekecfmbihef";
 
 function decodePublicDer(publicKeyBase64) {
   if (

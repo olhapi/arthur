@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import { CHROMIUM_EXTENSION_ID, CHROMIUM_PUBLIC_KEY_DER_BASE64, getChromiumExtensionId } from "../native-host/identity.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const EXTENSION_NAME = "Arthur — Article Saver";
+const EXTENSION_DESCRIPTION = "Save the rendered article you are reading as clean, local Markdown.";
+const HOMEPAGE_URL = "https://olhapi.github.io/arthur/";
 const TARGETS = [
   { name: "chrome", directory: "chrome-mv3", manifestVersion: 3, chromium: true, fixedChromiumIdentity: true },
   { name: "edge", directory: "edge-mv3", manifestVersion: 3, chromium: true, fixedChromiumIdentity: true },
@@ -22,6 +26,15 @@ const ICONS = {
 const STATUS_ICONS = ["ready", "saving", "saved", "attention"].flatMap((status) =>
   Object.keys(ICONS).map((size) => `icons/arthur-${status}-${size}.png`),
 );
+const REQUIRED_ARCHIVE_FILES = [
+  "manifest.json",
+  "background.js",
+  "content-scripts/content.js",
+  "options.html",
+  "status.html",
+  ...Object.values(ICONS),
+  ...STATUS_ICONS,
+];
 
 function fail(message) { throw new Error(message); }
 
@@ -46,10 +59,12 @@ function assertFile(root, relative, label) {
   });
 }
 
-function validateManifest(manifest, target) {
-  if (manifest.manifest_version !== target.manifestVersion || manifest.name !== "arthur" || manifest.version !== "0.1.0") {
+function validateManifest(manifest, target, expectedVersion) {
+  if (manifest.manifest_version !== target.manifestVersion || manifest.name !== EXTENSION_NAME || manifest.version !== expectedVersion) {
     fail(`${target.name} manifest identity is invalid.`);
   }
+  if (manifest.description !== EXTENSION_DESCRIPTION) fail(`${target.name} manifest description is invalid.`);
+  if (manifest.homepage_url !== HOMEPAGE_URL) fail(`${target.name} manifest homepage is invalid.`);
   exactArray(manifest.permissions, target.manifestVersion === 3 ? REQUIRED_PERMISSIONS : [...REQUIRED_PERMISSIONS, ...MATCHES], `${target.name} permissions`);
   if (target.chromium) {
     exactArray(manifest.host_permissions, MATCHES, `${target.name} host permissions`);
@@ -79,13 +94,25 @@ function validateManifest(manifest, target) {
   }
 }
 
-export async function validateBuildArtifacts({ root = path.join(ROOT, ".output") } = {}) {
+async function readExpectedVersion(packagePath) {
+  const packageJson = JSON.parse(await fs.readFile(packagePath, "utf8"));
+  if (typeof packageJson.version !== "string" || !/^\d+\.\d+\.\d+$/.test(packageJson.version)) {
+    fail("package.json version must be exact MAJOR.MINOR.PATCH semver.");
+  }
+  return packageJson.version;
+}
+
+export async function validateBuildArtifacts({
+  root = path.join(ROOT, ".output"),
+  packagePath = path.join(ROOT, "package.json"),
+} = {}) {
   const canonicalRoot = path.resolve(root);
+  const expectedVersion = await readExpectedVersion(packagePath);
   const targets = [];
   for (const target of TARGETS) {
     const artifact = path.join(canonicalRoot, target.directory);
     const manifest = JSON.parse(await fs.readFile(path.join(artifact, "manifest.json"), "utf8"));
-    validateManifest(manifest, target);
+    validateManifest(manifest, target, expectedVersion);
     await Promise.all([
       assertFile(artifact, "background.js", `${target.name} background entrypoint`),
       assertFile(artifact, "content-scripts/content.js", `${target.name} content-script entrypoint`),
@@ -99,11 +126,15 @@ export async function validateBuildArtifacts({ root = path.join(ROOT, ".output")
   return { smoke: "build-artifacts", targets };
 }
 
-export async function validateChromeStoreBuild({ root = path.join(ROOT, ".output") } = {}) {
+export async function validateChromeStoreBuild({
+  root = path.join(ROOT, ".output"),
+  packagePath = path.join(ROOT, "package.json"),
+} = {}) {
   const canonicalRoot = path.resolve(root);
+  const expectedVersion = await readExpectedVersion(packagePath);
   const artifact = path.join(canonicalRoot, CHROME_STORE_TARGET.directory);
   const manifest = JSON.parse(await fs.readFile(path.join(artifact, "manifest.json"), "utf8"));
-  validateManifest(manifest, CHROME_STORE_TARGET);
+  validateManifest(manifest, CHROME_STORE_TARGET, expectedVersion);
   await Promise.all([
     assertFile(artifact, "background.js", "Chrome Web Store background entrypoint"),
     assertFile(artifact, "content-scripts/content.js", "Chrome Web Store content-script entrypoint"),
@@ -115,14 +146,51 @@ export async function validateChromeStoreBuild({ root = path.join(ROOT, ".output
   return { smoke: "chrome-store-build", targets: ["chrome"] };
 }
 
+export async function validateStoreZipArtifacts({
+  root = path.join(ROOT, ".output"),
+  packagePath = path.join(ROOT, "package.json"),
+} = {}) {
+  const canonicalRoot = path.resolve(root);
+  const expectedVersion = await readExpectedVersion(packagePath);
+  const firefoxTarget = TARGETS.find((target) => target.name === "firefox");
+  const archiveSpecs = [
+    { name: `arthur-${expectedVersion}-chrome-store.zip`, target: CHROME_STORE_TARGET, resultTarget: "chrome" },
+    { name: `arthur-${expectedVersion}-firefox.zip`, target: firefoxTarget, resultTarget: "firefox" },
+  ];
+  const storeArchives = [];
+  for (const spec of archiveSpecs) {
+    const archive = path.join(canonicalRoot, spec.name);
+    await fs.stat(archive);
+    const inventory = execFileSync("/usr/bin/unzip", ["-Z1", archive], { encoding: "utf8" })
+      .split("\n")
+      .filter(Boolean)
+      .map((entry) => entry.replaceAll("\\", "/"));
+    if (inventory.some((entry) => entry.startsWith("/") || entry.split("/").includes(".."))) {
+      fail(`${spec.target.name} archive contains an unsafe path.`);
+    }
+    if (inventory.filter((entry) => entry === "manifest.json").length !== 1) {
+      fail(`${spec.target.name} archive must contain exactly one root manifest.json.`);
+    }
+    for (const required of REQUIRED_ARCHIVE_FILES) {
+      if (!inventory.includes(required)) fail(`${spec.target.name} archive is missing ${required}.`);
+    }
+    const manifest = JSON.parse(execFileSync("/usr/bin/unzip", ["-p", archive, "manifest.json"], { encoding: "utf8" }));
+    validateManifest(manifest, spec.target, expectedVersion);
+    storeArchives.push({ name: spec.name, target: spec.resultTarget, entries: inventory.length });
+  }
+  return { smoke: "store-zip-artifacts", storeArchives };
+}
+
 function parseArguments(argv) {
   if (argv.length === 0) return {};
   if (argv.length === 2 && argv[0] === "--build-root" && path.isAbsolute(argv[1])) return { root: argv[1] };
-  throw new Error("Usage: check-builds.mjs [--build-root /absolute/path]");
+  if (argv.length === 1 && argv[0] === "--store-zips") return { storeZips: true };
+  throw new Error("Usage: check-builds.mjs [--build-root /absolute/path | --store-zips]");
 }
 
 async function main() {
-  const result = await validateBuildArtifacts(parseArguments(process.argv.slice(2)));
+  const options = parseArguments(process.argv.slice(2));
+  const result = options.storeZips ? await validateStoreZipArtifacts() : await validateBuildArtifacts(options);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 

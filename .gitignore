@@ -1,7 +1,12 @@
 .worktrees/
+.DS_Store
+.superpowers/
+.pnpm-store/
+.playwright-cli/
 .site-dist/
 .output/
 .wxt/
+.env.submit
 coverage/
 dist/
 node_modules/

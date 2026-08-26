@@ -131,6 +131,17 @@ describe("native-host verification", () => {
     await writeFile(badId.plan.manifests[1]!.destination, JSON.stringify({ ...badId.plan.manifests[1]!.contents, allowed_origins: ["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"] }));
     await expect(verifyInstall({ home: badId.home, platform: "darwin" })).rejects.toThrow(/manifest/i);
 
+    const missingStoreOrigin = await installedFixture();
+    await writeFile(missingStoreOrigin.plan.manifests[0]!.destination, JSON.stringify({
+      ...missingStoreOrigin.plan.manifests[0]!.contents,
+      allowed_origins: ["chrome-extension://kaknffcpoififkcmhphedbajjbacfaof/"],
+    }));
+    await expect(verifyInstall({
+      home: missingStoreOrigin.home,
+      platform: "darwin",
+      spawn: spawning({ type: "hello_result", requestId: "verify-hello", protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" }),
+    })).rejects.toThrow(/manifest/i);
+
     const badPath = await installedFixture();
     await writeFile(badPath.plan.manifests[2]!.destination, JSON.stringify({ ...badPath.plan.manifests[2]!.contents, path: "/not/arthur-native-host" }));
     await expect(verifyInstall({ home: badPath.home, platform: "darwin" })).rejects.toThrow(/manifest/i);

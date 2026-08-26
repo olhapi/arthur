@@ -30,7 +30,10 @@ describe("native-host installation plan", () => {
       path.join(plan.home, "Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.olhapi.arthur.json"),
       path.join(plan.home, "Library/Application Support/Mozilla/NativeMessagingHosts/com.olhapi.arthur.json"),
     ]);
-    expect(plan.manifests[0]?.contents.allowed_origins).toEqual([`chrome-extension://${CHROMIUM_EXTENSION_ID}/`]);
+    expect(plan.manifests[0]?.contents.allowed_origins).toEqual([
+      `chrome-extension://${CHROMIUM_EXTENSION_ID}/`,
+      "chrome-extension://bfcgihgadankhhijhhdlkekecfmbihef/",
+    ]);
     expect(plan.manifests[1]?.contents.path).toBe(binary);
     expect(plan.manifests[2]?.contents.allowed_extensions).toEqual(["arthur@olhapi.com"]);
   });
