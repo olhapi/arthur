@@ -171,7 +171,9 @@ pub(super) fn media_stem_and_extension(
     let (stem, url_extension) = basename
         .rsplit_once('.')
         .filter(|(stem, extension)| !stem.is_empty() && !extension.is_empty())
-        .map_or((basename.as_str(), ""), |(stem, extension)| (stem, extension));
+        .map_or((basename.as_str(), ""), |(stem, extension)| {
+            (stem, extension)
+        });
     let url_extension = url_extension.to_ascii_lowercase();
     let extension = if recognized_extension(&url_extension) && url_extension != "bin" {
         url_extension
