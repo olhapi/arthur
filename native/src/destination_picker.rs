@@ -1,7 +1,11 @@
 use std::{path::PathBuf, process::Command};
 
-const PICKER_SCRIPT: &str =
-    "POSIX path of (choose folder with prompt \"Choose Arthur article folder\")";
+const PICKER_SCRIPT: &str = r#"
+tell current application
+    activate
+    POSIX path of (choose folder with prompt "Choose Arthur article folder")
+end tell
+"#;
 
 pub fn choose_destination() -> Result<PathBuf, ()> {
     let output = Command::new("/usr/bin/osascript")

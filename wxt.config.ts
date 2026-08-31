@@ -1,4 +1,5 @@
 import { defineConfig } from "wxt";
+import tailwindcss from "@tailwindcss/vite";
 
 import { CHROMIUM_PUBLIC_KEY_DER_BASE64 } from "./scripts/native-host/identity.mjs";
 
@@ -13,6 +14,7 @@ const EXTENSION_DESCRIPTION = "Save the rendered article you are reading as clea
 const HOMEPAGE_URL = "https://olhapi.github.io/arthur/";
 
 export default defineConfig({
+  vite: () => ({ plugins: [tailwindcss()] }),
   zip: {
     excludeSources: [
       "native/target/**",

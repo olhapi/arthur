@@ -36,7 +36,9 @@ function requiredElement<ElementType extends Element>(document: Document, select
 
 function renderStatus(element: HTMLElement, status: ConnectionStatus): void {
   element.dataset.kind = status.kind;
-  element.textContent = status.message;
+  const copy = element.querySelector<HTMLElement>(".status-copy");
+  if (copy === null) element.textContent = status.message;
+  else copy.textContent = status.message;
 }
 
 function validateDestination(value: string): ArthurSettings | undefined {
@@ -69,14 +71,21 @@ export function mountOptionsPage(document: Document, dependencies: OptionsDepend
   chooseDestination.addEventListener("click", async () => {
     if (dependencies.chooseDestination === undefined) return;
     chooseDestination.disabled = true;
+    renderStatus(folderStatus, { kind: "success", message: "Opening folder picker…" });
     try {
       const selected = await dependencies.chooseDestination();
-      if (selected === undefined) return;
+      if (selected === undefined) {
+        renderStatus(folderStatus, { kind: "error", message: "No folder was selected." });
+        return;
+      }
       destination.value = selected;
       const settings = parseInput();
       if (settings === undefined) return;
       await dependencies.storage.saveSettings(settings);
       renderStatus(folderStatus, { kind: "success", message: "Settings saved." });
+    } catch {
+      renderStatus(hostStatus, { kind: "error", message: "Native helper is unavailable." });
+      renderStatus(folderStatus, { kind: "error", message: "Folder picker could not be opened." });
     } finally {
       chooseDestination.disabled = false;
     }
@@ -149,8 +158,6 @@ export async function chooseNativeDestination(
         : undefined,
     );
     return settings.success ? settings.data.destination : undefined;
-  } catch {
-    return undefined;
   } finally {
     client?.close();
   }

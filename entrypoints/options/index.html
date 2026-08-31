@@ -6,18 +6,62 @@
     <title>Arthur settings</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
-  <body>
-    <main>
-      <h1>Arthur settings</h1>
-      <form id="options-form">
-        <label for="destination">Destination folder</label>
-        <input id="destination" name="destination" type="text" autocomplete="off" required />
-        <button id="choose-destination" type="button">Choose article folder</button>
-        <button type="submit">Save settings</button>
-      </form>
-      <button id="test-connection" type="button">Test connection</button>
-      <p id="host-status" aria-live="polite">Native host not checked.</p>
-      <p id="folder-status" aria-live="polite">Folder not checked.</p>
+  <body class="selection:bg-forest selection:text-white">
+    <main class="mx-auto flex min-h-screen w-full max-w-5xl items-center px-5 py-10 sm:px-8">
+      <section class="w-full overflow-hidden rounded-3xl border border-stone-200/80 bg-white shadow-[0_24px_80px_-32px_rgba(24,33,27,0.35)]">
+        <header class="border-b border-stone-100 px-6 py-7 sm:px-10 sm:py-9">
+          <div class="flex items-center gap-4">
+            <div class="grid size-12 place-items-center rounded-2xl bg-forest shadow-lg shadow-forest/20">
+              <img src="/icons/arthur.svg" alt="" class="size-8" />
+            </div>
+            <div>
+              <p class="mb-1 text-xs font-bold tracking-[0.18em] text-moss uppercase">Arthur</p>
+              <h1 class="text-2xl font-semibold tracking-tight text-ink sm:text-3xl">Article settings</h1>
+            </div>
+          </div>
+          <p class="mt-5 max-w-2xl text-sm leading-6 text-stone-600 sm:text-base">
+            Choose where Arthur saves clean Markdown articles and their downloaded media.
+          </p>
+        </header>
+
+        <div class="grid lg:grid-cols-[1fr_18rem]">
+          <form id="options-form" class="space-y-7 px-6 py-8 sm:px-10 sm:py-10">
+            <div>
+              <label for="destination" class="block text-sm font-semibold text-ink">Article folder</label>
+              <p id="destination-help" class="mt-1 text-sm leading-5 text-stone-500">Use an absolute path to a folder on your Mac.</p>
+              <div class="mt-3 flex flex-col gap-3 sm:flex-row">
+                <input id="destination" name="destination" type="text" autocomplete="off" required
+                  aria-describedby="destination-help folder-status"
+                  placeholder="/Users/you/Documents/Articles"
+                  class="min-w-0 flex-1 rounded-xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-ink shadow-sm transition placeholder:text-stone-400 hover:border-stone-400 focus:border-moss focus:bg-white focus:ring-4 focus:ring-moss/10 focus:outline-none" />
+                <button id="choose-destination" type="button"
+                  class="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl border border-stone-300 bg-white px-4 py-3 text-sm font-semibold text-ink shadow-sm transition hover:border-stone-400 hover:bg-stone-50 active:translate-y-px disabled:cursor-wait disabled:opacity-60">
+                  <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75A2.25 2.25 0 0 1 6 4.5h3.19c.6 0 1.17.24 1.6.66l1.05 1.06c.42.42 1 .66 1.59.66H18A2.25 2.25 0 0 1 20.25 9v7.5A2.25 2.25 0 0 1 18 18.75H6a2.25 2.25 0 0 1-2.25-2.25V6.75Z"/></svg>
+                  Choose folder
+                </button>
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-3 border-t border-stone-100 pt-6">
+              <button type="submit" class="rounded-xl bg-forest px-5 py-3 text-sm font-semibold text-white shadow-md shadow-forest/20 transition hover:bg-[#1b432f] active:translate-y-px">Save settings</button>
+              <button id="test-connection" type="button" class="rounded-xl px-5 py-3 text-sm font-semibold text-moss transition hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-60">Test connection</button>
+            </div>
+          </form>
+
+          <aside class="border-t border-stone-100 bg-stone-50/80 px-6 py-8 sm:px-10 lg:border-t-0 lg:border-l lg:px-7 lg:py-10">
+            <h2 class="text-xs font-bold tracking-[0.16em] text-stone-500 uppercase">Connection</h2>
+            <div class="mt-5 space-y-5">
+              <div id="host-status" class="flex gap-3" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span>
+                <div><p class="text-sm font-semibold text-ink">Native helper</p><p class="status-copy mt-0.5 text-sm leading-5 text-stone-500">Not checked.</p></div>
+              </div>
+              <div id="folder-status" class="flex gap-3" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span>
+                <div><p class="text-sm font-semibold text-ink">Article folder</p><p class="status-copy mt-0.5 text-sm leading-5 text-stone-500">Not checked.</p></div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
     </main>
     <script type="module" src="./main.ts"></script>
   </body>

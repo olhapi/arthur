@@ -75,6 +75,23 @@ describe("mountOptionsPage", () => {
     expect(document.querySelector("#folder-status")?.textContent).toBe("Settings saved.");
   });
 
+  it("reports a native picker failure instead of leaving the button silent", async () => {
+    const page = mountOptionsPage(optionsDocument(), {
+      storage: { getSettings: vi.fn().mockResolvedValue(undefined), saveSettings: vi.fn() },
+      testConnection: vi.fn(),
+      chooseDestination: vi.fn().mockRejectedValue(new Error("native host unavailable")),
+    });
+    await page.ready;
+
+    document.querySelector<HTMLButtonElement>("#choose-destination")!.click();
+
+    await vi.waitFor(() =>
+      expect(document.querySelector("#folder-status")?.textContent).toBe("Folder picker could not be opened."),
+    );
+    expect(document.querySelector("#host-status")?.textContent).toBe("Native helper is unavailable.");
+    expect(document.querySelector<HTMLButtonElement>("#choose-destination")?.disabled).toBe(false);
+  });
+
   it("rejects empty and relative destinations without saving", async () => {
     const storage = {
       getSettings: vi.fn().mockResolvedValue(undefined),
