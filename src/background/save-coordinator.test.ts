@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ExtractedArticle, ExtractedMedia } from "../article/extract.js";
 import { MEDIA_LIMITS } from "../shared/constants.js";
@@ -463,6 +463,82 @@ describe("SaveCoordinator", () => {
     expect(native.beginMarkdown).toBe(`${first.placeholder} <https://cdn.example.test/second.webp>`);
     expect(native.calls.filter((call) => call === "begin_media")).toHaveLength(1);
     expect(cancelled).toBe(true);
+  });
+
+  it("starts a five-image article's preflights together instead of adding their latency", async () => {
+    const media = Array.from({ length: 5 }, (_, index): ExtractedMedia => ({
+      ...directMedia(),
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      url: `https://cdn.example.test/image-${index}.webp`,
+      placeholder: `arthur-media://00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    }));
+    const started: string[] = [];
+    let releasePreflights!: () => void;
+    const preflightGate = new Promise<void>((resolve) => { releasePreflights = resolve; });
+    const { coordinator } = createCoordinator({
+      extracted: article({ media, markdown: media.map((item) => item.placeholder).join(" ") }),
+      preflight: async (item) => {
+        started.push(item.id);
+        await preflightGate;
+        return {
+          status: "eligible",
+          media: item,
+          response: new Response(null),
+          contentType: "image/webp",
+          declaredBytes: 1,
+        };
+      },
+      transfer: async () => "saved",
+    });
+
+    const saving = coordinator.save(1, "https://example.test/article");
+    try {
+      await vi.waitFor(() => expect(started).toHaveLength(5), { timeout: 100 });
+    } finally {
+      releasePreflights();
+    }
+    await expect(saving).resolves.toMatchObject({ status: "success" });
+  });
+
+  it("bounds concurrent media preflights to six", async () => {
+    const media = Array.from({ length: 7 }, (_, index): ExtractedMedia => ({
+      ...directMedia(),
+      id: `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      url: `https://cdn.example.test/bounded-${index}.webp`,
+      placeholder: `arthur-media://10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    }));
+    const started: string[] = [];
+    let releaseFirstBatch!: () => void;
+    let releaseSecondBatch!: () => void;
+    const firstBatchGate = new Promise<void>((resolve) => { releaseFirstBatch = resolve; });
+    const secondBatchGate = new Promise<void>((resolve) => { releaseSecondBatch = resolve; });
+    const { coordinator } = createCoordinator({
+      extracted: article({ media, markdown: media.map((item) => item.placeholder).join(" ") }),
+      preflight: async (item) => {
+        const position = started.push(item.id);
+        await (position <= 6 ? firstBatchGate : secondBatchGate);
+        return {
+          status: "eligible",
+          media: item,
+          response: new Response(null),
+          contentType: "image/webp",
+          declaredBytes: 1,
+        };
+      },
+      transfer: async () => "saved",
+    });
+
+    const saving = coordinator.save(1, "https://example.test/article");
+    try {
+      await vi.waitFor(() => expect(started).toHaveLength(6), { timeout: 100 });
+      expect(started).toHaveLength(6);
+      releaseFirstBatch();
+      await vi.waitFor(() => expect(started).toHaveLength(7), { timeout: 100 });
+    } finally {
+      releaseFirstBatch();
+      releaseSecondBatch();
+    }
+    await expect(saving).resolves.toMatchObject({ status: "success" });
   });
 
   it("cancels retained responses when a later preflight rejects", async () => {

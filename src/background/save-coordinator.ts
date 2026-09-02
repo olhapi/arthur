@@ -50,6 +50,7 @@ class CoordinatorError extends Error {
 }
 
 const MAX_MEDIA_PER_SAVE = 4_096;
+const MEDIA_PREFLIGHT_CONCURRENCY = 6;
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 
 function uniqueMedia(media: readonly ExtractedMedia[]): ExtractedMedia[] {
@@ -245,24 +246,40 @@ export class SaveCoordinator {
     const prepared: PreparedMedia[] = [];
     let declaredTotal = 0;
     try {
-      for (const item of media.slice(0, MAX_MEDIA_PER_SAVE)) {
-        const next = await this.preflight(item, this.dependencies.fetcher);
-        if (
-          next.status === "eligible" &&
-          next.declaredBytes !== undefined &&
-          declaredTotal + next.declaredBytes > MEDIA_LIMITS.total
-        ) {
-          discardPreparedResponse(next);
-          prepared.push({
-            status: "fallback",
-            media: next.media,
-            code: "media_limit_exceeded",
-            message: "The save exceeds its configured total media limit.",
-          });
-          continue;
+      const candidates = media.slice(0, MAX_MEDIA_PER_SAVE);
+      for (let offset = 0; offset < candidates.length; offset += MEDIA_PREFLIGHT_CONCURRENCY) {
+        const batch = await Promise.allSettled(
+          candidates
+            .slice(offset, offset + MEDIA_PREFLIGHT_CONCURRENCY)
+            .map((item) => this.preflight(item, this.dependencies.fetcher)),
+        );
+        const completed = batch.filter(
+          (result): result is PromiseFulfilledResult<PreparedMedia> => result.status === "fulfilled",
+        );
+        const rejected = batch.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        if (rejected !== undefined) {
+          discardEligibleResponses(completed.map((result) => result.value));
+          throw rejected.reason;
         }
-        if (next.status === "eligible" && next.declaredBytes !== undefined) declaredTotal += next.declaredBytes;
-        prepared.push(next);
+
+        for (const { value: next } of completed) {
+          if (
+            next.status === "eligible" &&
+            next.declaredBytes !== undefined &&
+            declaredTotal + next.declaredBytes > MEDIA_LIMITS.total
+          ) {
+            discardPreparedResponse(next);
+            prepared.push({
+              status: "fallback",
+              media: next.media,
+              code: "media_limit_exceeded",
+              message: "The save exceeds its configured total media limit.",
+            });
+            continue;
+          }
+          if (next.status === "eligible" && next.declaredBytes !== undefined) declaredTotal += next.declaredBytes;
+          prepared.push(next);
+        }
       }
       for (const item of media.slice(MAX_MEDIA_PER_SAVE)) {
         prepared.push({
