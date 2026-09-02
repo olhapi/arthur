@@ -134,6 +134,15 @@ function isSubstackPostTerminator(element: Element): boolean {
   );
 }
 
+function normalizeSubstackHeadings(body: HTMLElement): void {
+  // Readability treats "header" as boilerplate once an article is large
+  // enough to use its normal filtering pass. Substack gives every in-body
+  // heading this class, regardless of whether the post has a paywall.
+  for (const heading of body.querySelectorAll("h1.header-anchor-post, h2.header-anchor-post, h3.header-anchor-post, h4.header-anchor-post, h5.header-anchor-post, h6.header-anchor-post")) {
+    heading.classList.remove("header-anchor-post");
+  }
+}
+
 /**
  * Substack renders continuation nodes as direct article siblings outside the
  * body Readability chooses. The section heading can precede PaywallToDOM while
@@ -144,7 +153,11 @@ function materializeSubstackSubscriberContent(document: Document): void {
   for (const post of document.querySelectorAll<HTMLElement>("article.newsletter-post.post")) {
     const body = post.querySelector<HTMLElement>(".dt-post-body .available-content .body.markup");
     const paywall = post.querySelector<HTMLElement>('[data-component-name="PaywallToDOM"].paywall-jump');
-    if (body === null || paywall === null) continue;
+    if (body === null) continue;
+
+    normalizeSubstackHeadings(body);
+
+    if (paywall === null) continue;
 
     let bodyContainer: HTMLElement = body;
     while (bodyContainer.parentElement !== post) {
@@ -160,10 +173,7 @@ function materializeSubstackSubscriberContent(document: Document): void {
       sibling = next;
     }
     paywall.remove();
-
-    for (const heading of body.querySelectorAll("h1.header-anchor-post, h2.header-anchor-post, h3.header-anchor-post, h4.header-anchor-post, h5.header-anchor-post, h6.header-anchor-post")) {
-      heading.classList.remove("header-anchor-post");
-    }
+    normalizeSubstackHeadings(body);
   }
 }
 

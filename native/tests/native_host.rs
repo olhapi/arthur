@@ -13,6 +13,7 @@ use std::{
 static COUNT: AtomicU64 = AtomicU64::new(0);
 const SESSION: &str = "a5a74c85-92de-4a5d-9768-4e66c4d64987";
 const SECOND_SESSION: &str = "b5a74c85-92de-4a5d-9768-4e66c4d64987";
+const WRITER_ID: &str = "c5a74c85-92de-4a5d-9768-4e66c4d64987";
 
 fn frame(payload: &[u8]) -> Vec<u8> {
     let mut result = (payload.len() as u32).to_le_bytes().to_vec();
@@ -34,8 +35,18 @@ fn temp() -> PathBuf {
     path
 }
 
+fn host_command() -> Command {
+    let home = temp();
+    let state = home.join("Library/Application Support/Arthur/state");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("writer-id"), format!("{WRITER_ID}\n")).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arthur-native-host"));
+    command.env("HOME", home);
+    command
+}
+
 fn run(input: &[u8]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_arthur-native-host"))
+    let mut child = host_command()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -47,7 +58,7 @@ fn run(input: &[u8]) -> Output {
 }
 
 fn run_with_environment(input: &[u8], key: &str, value: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_arthur-native-host"))
+    let mut child = host_command()
         .env(key, value)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -193,7 +204,7 @@ fn split_and_coalesced_valid_frames_receive_one_response_each_in_order() {
     let second = request(serde_json::json!({
         "type":"hello", "requestId":"second", "protocolVersion":1
     }));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_arthur-native-host"))
+    let mut child = host_command()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -260,7 +271,10 @@ fn eof_aborts_an_active_session_without_replacing_the_old_note() {
     assert_eq!(messages.len(), 1);
     assert!(matches!(messages[0], HostMessage::Ack { .. }));
     assert_eq!(fs::read(&note).unwrap(), original);
-    let slot = destination.join(".arthur-workspace-v1/slot-0");
+    let slot = destination
+        .join(".arthur-workspace-v2")
+        .join(WRITER_ID)
+        .join("slot-0");
     assert_eq!(fs::metadata(slot.join("new-note")).unwrap().len(), 0);
     assert_eq!(fs::metadata(slot.join("old-backup")).unwrap().len(), 0);
     fs::remove_dir_all(destination).unwrap();
@@ -311,7 +325,7 @@ fn markdown_boundary_is_semantic_not_frame_poisoning() {
 #[test]
 fn destination_flock_serializes_independent_native_host_processes_and_releases_on_eof() {
     let destination = temp();
-    let mut first = Command::new(env!("CARGO_BIN_EXE_arthur-native-host"))
+    let mut first = host_command()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -100,6 +100,42 @@ async function beginOpenMedia(client: NativeClient, port: FakeNativePort): Promi
 }
 
 describe("NativeClient", () => {
+  it("terminally disconnects a silent native host after the response deadline", async () => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port, { requestTimeoutMs: 10 });
+
+    const result = await Promise.race([
+      client.request({ type: "hello", requestId: "hello-1", protocolVersion: 1 }).catch((error: unknown) => error),
+      new Promise((resolve) => setTimeout(() => resolve({ code: "test_timeout" }), 100)),
+    ]);
+
+    expect(result).toMatchObject({
+      code: "native_timeout",
+      message: expect.stringContaining("respond"),
+    });
+    expect(client.isTerminal).toBe(true);
+    expect(port.disconnectCalls).toBe(1);
+  });
+
+  it("releases an active native transaction when a request response times out", async () => {
+    const port = new FakeNativePort();
+    const client = new NativeClient(port, {
+      createRequestId: sequentialRequestIds(),
+      requestTimeoutMs: 10,
+    });
+    await beginSave(client, port);
+
+    const result = await Promise.race([
+      client.commitSave().catch((error: unknown) => error),
+      new Promise((resolve) => setTimeout(() => resolve({ code: "test_timeout" }), 100)),
+    ]);
+
+    expect(result).toMatchObject({ code: "native_timeout" });
+    expect(client.sessionId).toBeUndefined();
+    expect(port.hostTransactionActive).toBe(false);
+    expect(port.destinationLocked).toBe(false);
+  });
+
   it("resolves a normal operation for its matching request ID", async () => {
     const port = new FakeNativePort();
     const client = new NativeClient(port);

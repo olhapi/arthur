@@ -36,6 +36,7 @@ export interface SaveCoordinatorDependencies {
   createSessionId?: () => string;
   preflight?: (media: ExtractedMedia, fetcher: typeof fetch) => Promise<PreparedMedia>;
   transfer?: (prepared: PreparedMedia, client: NativeClient) => Promise<"saved" | "fallback">;
+  idleTimeoutMs?: number;
 }
 
 class CoordinatorError extends Error {
@@ -49,6 +50,7 @@ class CoordinatorError extends Error {
 }
 
 const MAX_MEDIA_PER_SAVE = 4_096;
+const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 
 function uniqueMedia(media: readonly ExtractedMedia[]): ExtractedMedia[] {
   const seen = new Set<string>();
@@ -119,12 +121,14 @@ export class SaveCoordinator {
   private readonly preflight: (media: ExtractedMedia, fetcher: typeof fetch) => Promise<PreparedMedia>;
   private readonly transfer: (prepared: PreparedMedia, client: NativeClient) => Promise<"saved" | "fallback">;
   private readonly createNativeClient: () => NativeClient;
+  private readonly idleTimeoutMs: number;
   private nativeClient: NativeClient | undefined;
 
   constructor(private readonly dependencies: SaveCoordinatorDependencies) {
     this.createSessionId = dependencies.createSessionId ?? (() => crypto.randomUUID());
     this.preflight = dependencies.preflight ?? preflightMedia;
     this.transfer = dependencies.transfer ?? transferMedia;
+    this.idleTimeoutMs = dependencies.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     if (typeof dependencies.nativeClient === "function") {
       this.createNativeClient = dependencies.nativeClient;
     } else {
@@ -140,15 +144,22 @@ export class SaveCoordinator {
     let client: NativeClient | undefined;
     let prepared: PreparedMedia[] = [];
     try {
-      const settings = ArthurSettingsSchema.safeParse(await this.dependencies.loadSettings());
+      const settings = ArthurSettingsSchema.safeParse(await this.withIdleDeadline(
+        this.dependencies.loadSettings(),
+        "Settings stopped responding. Reload the extension and try again.",
+      ));
       if (!settings.success) {
         throw new CoordinatorError("destination_unconfigured", "Choose an absolute destination before saving.");
       }
 
       let article: ExtractedArticle;
       try {
-        article = await this.dependencies.extract(tabId, tabUrl);
-      } catch {
+        article = await this.withIdleDeadline(
+          this.dependencies.extract(tabId, tabUrl),
+          "Article extraction stopped responding. Reload the page and try again.",
+        );
+      } catch (error) {
+        if (error instanceof CoordinatorError) throw error;
         throw new CoordinatorError("extraction_failed", "The current page could not be extracted as an article.");
       }
 
@@ -266,5 +277,31 @@ export class SaveCoordinator {
       discardEligibleResponses(prepared);
       throw error;
     }
+  }
+
+  private withIdleDeadline<T>(operation: Promise<T>, message: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new CoordinatorError("save_timeout", message));
+      }, this.idleTimeoutMs);
+
+      void operation.then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          reject(error);
+        },
+      );
+    });
   }
 }

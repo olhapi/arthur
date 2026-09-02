@@ -20,7 +20,7 @@ async function parentIsAbsent(fs, home, parent) {
 export async function buildUninstallPlan({ home, platform, targets, fs = nodeFs } = {}) {
   const canonicalHome = await canonicalizeHome(fs, home);
   const expected = nativeHostTargets({ home: canonicalHome, platform });
-  const allowlist = Object.values(expected);
+  const allowlist = [expected.binary, expected.chrome, expected.edge, expected.firefox];
   if (targets !== undefined && (targets.length !== allowlist.length || targets.some((target) => !allowlist.includes(target)))) {
     throw new Error("Uninstall target is outside Arthur's exact allowlist.");
   }
@@ -31,7 +31,7 @@ export async function applyUninstallPlan(plan, { fs = nodeFs, home, platform } =
   if (!plan || !Array.isArray(plan.targets) || plan.targets.length !== 4) throw new TypeError("Uninstall plan must contain four exact targets.");
   const canonicalHome = await canonicalizeHome(fs, home);
   const expected = nativeHostTargets({ home: canonicalHome, platform });
-  const targets = Object.values(expected);
+  const targets = [expected.binary, expected.chrome, expected.edge, expected.firefox];
   const nativeHostDirectory = path.dirname(expected.binary);
   if (plan.targets.some((target, index) => target !== targets[index]) || plan.nativeHostDirectory !== nativeHostDirectory) {
     throw new Error("Uninstall plan contains a target outside Arthur's exact allowlist.");

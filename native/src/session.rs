@@ -13,6 +13,7 @@ const CHUNK_BYTES: usize = 256 * 1024;
 
 pub struct SessionManager {
     sessions: HashMap<String, VaultTransaction>,
+    writer_id: String,
     #[cfg(feature = "acceptance-faults")]
     before_note_rename_fault: bool,
 }
@@ -25,8 +26,13 @@ impl Default for SessionManager {
 
 impl SessionManager {
     pub fn new() -> Self {
+        Self::with_writer_id("00000000-0000-4000-8000-000000000000")
+    }
+
+    pub fn with_writer_id(writer_id: &str) -> Self {
         Self {
             sessions: HashMap::new(),
+            writer_id: writer_id.to_owned(),
             #[cfg(feature = "acceptance-faults")]
             before_note_rename_fault: false,
         }
@@ -36,6 +42,7 @@ impl SessionManager {
     pub fn with_before_note_rename_fault() -> Self {
         Self {
             sessions: HashMap::new(),
+            writer_id: "00000000-0000-4000-8000-000000000000".to_owned(),
             before_note_rename_fault: true,
         }
     }
@@ -64,7 +71,7 @@ impl SessionManager {
             ClientMessage::TestDestination {
                 request_id,
                 destination,
-            } => match Vault::probe(Path::new(&destination)) {
+            } => match Vault::probe_for_writer(Path::new(&destination), &self.writer_id) {
                 Ok(probe) => HostMessage::TestDestinationResult {
                     request_id,
                     destination: probe.canonical_destination.to_string_lossy().into_owned(),
@@ -100,14 +107,16 @@ impl SessionManager {
                         "A save with this session is already active.",
                     );
                 }
-                match Vault::open(Path::new(&destination)).and_then(|vault| {
-                    vault.begin(SaveSpec {
-                        session_id: session_id.clone(),
-                        title,
-                        source,
-                        markdown,
-                    })
-                }) {
+                match Vault::open_for_writer(Path::new(&destination), &self.writer_id).and_then(
+                    |vault| {
+                        vault.begin(SaveSpec {
+                            session_id: session_id.clone(),
+                            title,
+                            source,
+                            markdown,
+                        })
+                    },
+                ) {
                     Ok(transaction) => {
                         self.sessions.insert(session_id.clone(), transaction);
                         ack(request_id, Some(session_id), None, None)

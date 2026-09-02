@@ -25,7 +25,45 @@ fn probe_is_writable_without_leaving_a_file() {
         .collect::<Vec<_>>();
     assert_eq!(entries.len(), 2);
     assert!(path.join("attachments").is_dir());
-    assert!(path.join(".arthur-workspace-v1").is_dir());
+    assert!(
+        path.join(".arthur-workspace-v2/00000000-0000-4000-8000-000000000000")
+            .is_dir()
+    );
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn scopes_workspace_state_per_writer_and_leaves_v1_untouched() {
+    let path = temp();
+    let legacy = path.join(".arthur-workspace-v1");
+    fs::create_dir(&legacy).unwrap();
+    fs::write(legacy.join("evidence"), b"legacy").unwrap();
+    Vault::probe_for_writer(&path, "11111111-1111-4111-8111-111111111111").unwrap();
+    Vault::probe_for_writer(&path, "22222222-2222-4222-8222-222222222222").unwrap();
+    assert_eq!(fs::read(legacy.join("evidence")).unwrap(), b"legacy");
+    assert!(
+        path.join(".arthur-workspace-v2/11111111-1111-4111-8111-111111111111")
+            .is_dir()
+    );
+    assert!(
+        path.join(".arthur-workspace-v2/22222222-2222-4222-8222-222222222222")
+            .is_dir()
+    );
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn persisted_v2_journals_contain_no_machine_local_file_identity() {
+    let path = temp();
+    Vault::probe_for_writer(&path, "11111111-1111-4111-8111-111111111111").unwrap();
+    let journal = fs::read_to_string(
+        path.join(".arthur-workspace-v2/11111111-1111-4111-8111-111111111111/slot-0/journal-b"),
+    )
+    .unwrap();
+    assert!(!journal.contains("device"));
+    assert!(!journal.contains("inode"));
+    assert!(!journal.contains("links"));
+    drop(Vault::open_for_writer(&path, "11111111-1111-4111-8111-111111111111").unwrap());
     fs::remove_dir_all(path).unwrap();
 }
 #[test]

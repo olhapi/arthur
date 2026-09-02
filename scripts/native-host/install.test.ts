@@ -1,5 +1,5 @@
 import * as nodeFs from "node:fs/promises";
-import { mkdtemp, mkdir, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -20,6 +20,41 @@ async function fixture() {
 }
 
 describe("native-host installation plan", () => {
+  it("creates one local writer identity and preserves it across upgrades", async () => {
+    const options = await fixture();
+    const first = await buildInstallPlan({ ...options, platform: "darwin" });
+    await applyInstallPlan(first, { home: options.home, platform: "darwin" });
+    const writerIdPath = path.join(options.home, "Library/Application Support/Arthur/state/writer-id");
+    const writerId = await readFile(writerIdPath, "utf8");
+    expect(writerId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\n$/);
+    expect((await nodeFs.lstat(writerIdPath)).mode & 0o777).toBe(0o600);
+
+    const second = await buildInstallPlan({ ...options, platform: "darwin" });
+    await applyInstallPlan(second, { home: options.home, platform: "darwin" });
+    expect(await readFile(writerIdPath, "utf8")).toBe(writerId);
+  });
+
+  it("rejects an unsafe or malformed existing writer identity", async () => {
+    const malformed = await fixture();
+    const malformedPath = path.join(malformed.home, "Library/Application Support/Arthur/state/writer-id");
+    await mkdir(path.dirname(malformedPath), { recursive: true });
+    await writeFile(malformedPath, "not-a-writer\n");
+    await expect(buildInstallPlan({ ...malformed, platform: "darwin" })).rejects.toThrow(/writer identity/i);
+
+    const linked = await fixture();
+    const linkedPath = path.join(linked.home, "Library/Application Support/Arthur/state/writer-id");
+    await mkdir(path.dirname(linkedPath), { recursive: true });
+    await symlink("/tmp/not-arthur", linkedPath);
+    await expect(buildInstallPlan({ ...linked, platform: "darwin" })).rejects.toThrow(/symlink/i);
+
+    const permissive = await fixture();
+    const permissivePath = path.join(permissive.home, "Library/Application Support/Arthur/state/writer-id");
+    await mkdir(path.dirname(permissivePath), { recursive: true });
+    await writeFile(permissivePath, "123e4567-e89b-42d3-a456-426614174000\n");
+    await chmod(permissivePath, 0o644);
+    await expect(buildInstallPlan({ ...permissive, platform: "darwin" })).rejects.toThrow(/0600/i);
+  });
+
   it("contains one direct Rust binary and three exact user-level manifests", async () => {
     const options = await fixture();
     const plan = await buildInstallPlan({ ...options, platform: "darwin" });
@@ -77,7 +112,7 @@ describe("native-host installation plan", () => {
         },
       },
     });
-    expect(renames).toHaveLength(4);
+    expect(renames).toHaveLength(5);
     for (const [from, to] of renames) expect(path.dirname(from)).toBe(path.dirname(to));
     expect(await readFile(plan.payloads[0]!.destination, "utf8")).toBe("native-host");
     for (const manifest of plan.manifests) expect(JSON.parse(await readFile(manifest.destination, "utf8"))).toEqual(manifest.contents);
@@ -88,6 +123,7 @@ describe("native-host installation plan", () => {
     const plan = await buildInstallPlan({ ...options, platform: "darwin" });
     const parents = new Set([
       path.dirname(plan.payloads[0]!.destination),
+      path.dirname(plan.writerIdentity.destination),
       ...plan.manifests.map((manifest) => path.dirname(manifest.destination)),
     ]);
     const synced: string[] = [];

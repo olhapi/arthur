@@ -110,7 +110,7 @@ fn repeated_overwrites_reuse_one_bounded_four_slot_workspace() {
             .unwrap();
     }
 
-    let workspace = destination.join(".arthur-workspace-v1");
+    let workspace = destination.join(".arthur-workspace-v2/00000000-0000-4000-8000-000000000000");
     assert!(workspace.is_dir());
     let children: Vec<_> = fs::read_dir(&workspace)
         .unwrap()
@@ -142,7 +142,7 @@ fn repeated_overwrites_reuse_one_bounded_four_slot_workspace() {
 fn four_wrong_slot_markers_quarantine_without_touching_substitutes() {
     let destination = temp();
     drop(Vault::open(&destination).unwrap());
-    let workspace = destination.join(".arthur-workspace-v1");
+    let workspace = destination.join(".arthur-workspace-v2/00000000-0000-4000-8000-000000000000");
     for index in 0..4 {
         fs::write(workspace.join(format!("slot-{index}/owner")), b"substitute").unwrap();
     }
@@ -176,7 +176,8 @@ fn one_invalid_slot_leaves_three_usable_slots_for_saves() {
     ] {
         let destination = temp();
         drop(Vault::open(&destination).unwrap());
-        let slot = destination.join(".arthur-workspace-v1/slot-0");
+        let slot =
+            destination.join(".arthur-workspace-v2/00000000-0000-4000-8000-000000000000/slot-0");
 
         match invalid {
             InvalidSlot::Marker => fs::write(slot.join("owner"), b"unrelated marker").unwrap(),
@@ -216,11 +217,14 @@ fn one_invalid_slot_leaves_three_usable_slots_for_saves() {
 #[test]
 fn partial_workspace_and_missing_fixed_children_fail_closed_without_cleanup() {
     let partial = temp();
-    let workspace = partial.join(".arthur-workspace-v1");
+    let root = partial.join(".arthur-workspace-v2");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("owner"), b"arthur-workspace-root-v2\n").unwrap();
+    let workspace = root.join("00000000-0000-4000-8000-000000000000");
     fs::create_dir(&workspace).unwrap();
     fs::write(
         workspace.join("owner"),
-        b"arthur-workspace-owner-v1\nslots=4\nmedia=4096\n",
+        b"arthur-writer-workspace-v2\nslots=4\nmedia=4096\n",
     )
     .unwrap();
     fs::create_dir(workspace.join("slot-0")).unwrap();
@@ -237,7 +241,7 @@ fn partial_workspace_and_missing_fixed_children_fail_closed_without_cleanup() {
     for index in 0..4 {
         fs::remove_file(
             missing
-                .join(".arthur-workspace-v1")
+                .join(".arthur-workspace-v2/00000000-0000-4000-8000-000000000000")
                 .join(format!("slot-{index}"))
                 .join("new-note"),
         )
@@ -247,7 +251,7 @@ fn partial_workspace_and_missing_fixed_children_fail_closed_without_cleanup() {
     for index in 0..4 {
         assert!(
             !missing
-                .join(".arthur-workspace-v1")
+                .join(".arthur-workspace-v2/00000000-0000-4000-8000-000000000000")
                 .join(format!("slot-{index}"))
                 .join("new-note")
                 .exists()
@@ -263,7 +267,7 @@ fn slot_directory_swap_quarantines_without_touching_the_substitute() {
         .unwrap()
         .begin(save_spec("https://example.test/article", "Article", "body"))
         .unwrap();
-    let workspace = destination.join(".arthur-workspace-v1");
+    let workspace = destination.join(".arthur-workspace-v2/00000000-0000-4000-8000-000000000000");
     let visible = workspace.join("slot-0");
     let displaced = workspace.join("displaced-slot-0");
     fs::rename(&visible, &displaced).unwrap();
@@ -286,7 +290,7 @@ fn late_marker_extra_and_fixed_hardlink_changes_fail_closed() {
         .unwrap()
         .begin(save_spec("https://example.test/marker", "Marker", "body"))
         .unwrap();
-    let owner = marker.join(".arthur-workspace-v1/owner");
+    let owner = marker.join(".arthur-workspace-v2/owner");
     fs::write(&owner, b"unrelated marker").unwrap();
     assert_eq!(transaction.commit(), Err(VaultError::UnsafeChild));
     assert_eq!(fs::read(&owner).unwrap(), b"unrelated marker");
@@ -297,7 +301,7 @@ fn late_marker_extra_and_fixed_hardlink_changes_fail_closed() {
         .unwrap()
         .begin(save_spec("https://example.test/extra", "Extra", "body"))
         .unwrap();
-    let slot = extra.join(".arthur-workspace-v1/slot-0");
+    let slot = extra.join(".arthur-workspace-v2/00000000-0000-4000-8000-000000000000/slot-0");
     let invalid = OsString::from("bad-\u{202e}");
     fs::write(slot.join(&invalid), b"unrelated extra").unwrap();
     assert_eq!(transaction.commit(), Err(VaultError::UnsafeChild));
@@ -309,7 +313,8 @@ fn late_marker_extra_and_fixed_hardlink_changes_fail_closed() {
         .unwrap()
         .begin(save_spec("https://example.test/link", "Link", "body"))
         .unwrap();
-    let fixed = linked.join(".arthur-workspace-v1/slot-0/new-note");
+    let fixed =
+        linked.join(".arthur-workspace-v2/00000000-0000-4000-8000-000000000000/slot-0/new-note");
     let alias = linked.join("fixed-alias");
     fs::hard_link(&fixed, &alias).unwrap();
     assert_eq!(transaction.commit(), Err(VaultError::UnsafeChild));
@@ -335,7 +340,8 @@ fn late_marker_extra_and_fixed_hardlink_changes_fail_closed() {
             None,
         ))
         .unwrap();
-    let fixed = media.join(".arthur-workspace-v1/slot-0/media-0");
+    let fixed =
+        media.join(".arthur-workspace-v2/00000000-0000-4000-8000-000000000000/slot-0/media-0");
     let alias = media.join("media-alias");
     fs::hard_link(&fixed, &alias).unwrap();
     assert_eq!(
@@ -798,6 +804,72 @@ fn held_attachments_descriptor_cannot_be_redirected_by_a_visible_symlink_swap() 
     fs::rename(&held, &original).unwrap();
     fs::remove_dir_all(destination).unwrap();
     fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
+fn source_identity_preserves_additional_frontmatter_when_replacing_in_place() {
+    let destination = temp();
+    let source = "https://example.test/article";
+    fs::write(
+        destination.join("Article.md"),
+        "---\ntitle: \"Article\"\ntags:\n  - topic/testing\n  - stage/manager\nsource: \"https://example.test/article\"\n---\n\nold body",
+    )
+    .unwrap();
+
+    let saved = Vault::open(&destination)
+        .unwrap()
+        .begin(save_spec(source, "Article", "new body"))
+        .unwrap()
+        .commit()
+        .unwrap();
+
+    assert_eq!(saved.display_path.file_name().unwrap(), "Article.md");
+    assert_eq!(
+        fs::read_to_string(destination.join("Article.md")).unwrap(),
+        "---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\ntags:\n  - topic/testing\n  - stage/manager\n---\n\nnew body"
+    );
+    assert_eq!(
+        fs::read_dir(&destination)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|value| value == "md"))
+            .count(),
+        1
+    );
+    fs::remove_dir_all(destination).unwrap();
+}
+
+#[test]
+fn source_identity_prefers_the_exact_title_path_when_a_hashed_duplicate_exists() {
+    let destination = temp();
+    let source = "https://example.test/article";
+    let duplicate =
+        "---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\n---\n\nduplicate";
+    fs::write(destination.join("Article--e6b7ccaedbf1.md"), duplicate).unwrap();
+    fs::write(
+        destination.join("Article.md"),
+        "---\ntitle: \"Article\"\nsource: \"https://example.test/article\"\ntags:\n  - topic/testing\n---\n\noriginal",
+    )
+    .unwrap();
+
+    let saved = Vault::open(&destination)
+        .unwrap()
+        .begin(save_spec(source, "Article", "replacement"))
+        .unwrap()
+        .commit()
+        .unwrap();
+
+    assert_eq!(saved.display_path.file_name().unwrap(), "Article.md");
+    assert!(
+        fs::read_to_string(destination.join("Article.md"))
+            .unwrap()
+            .ends_with("\n\nreplacement")
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("Article--e6b7ccaedbf1.md")).unwrap(),
+        duplicate
+    );
+    fs::remove_dir_all(destination).unwrap();
 }
 
 #[test]

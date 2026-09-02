@@ -28,8 +28,11 @@ std::thread_local! {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct FileFingerprint {
+    #[serde(skip, default)]
     pub device: u64,
+    #[serde(skip, default)]
     pub inode: u64,
+    #[serde(skip, default)]
     pub links: u64,
     pub size: u64,
     pub sha256: String,
@@ -37,7 +40,9 @@ pub(super) struct FileFingerprint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct FileIdentity {
+    #[serde(skip, default)]
     pub device: u64,
+    #[serde(skip, default)]
     pub inode: u64,
 }
 

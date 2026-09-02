@@ -29,6 +29,7 @@ export interface NativeClientLimits {
 export interface NativeClientOptions {
   createRequestId?: () => string;
   limits?: NativeClientLimits;
+  requestTimeoutMs?: number;
 }
 
 export interface BeginSaveRequest {
@@ -64,6 +65,7 @@ interface ActiveSession {
 interface PendingOperation {
   resolve: (message: HostMessage) => void;
   reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
 }
 
 interface PendingRequest extends PendingOperation {
@@ -82,6 +84,8 @@ const DEFAULT_LIMITS: NativeClientLimits = {
   video: MEDIA_LIMITS.video,
   total: MEDIA_LIMITS.total,
 };
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 export class NativeClientError extends Error {
   constructor(
@@ -104,6 +108,12 @@ export class NativeHostError extends NativeClientError {}
 export class NativeDisconnectedError extends NativeClientError {
   constructor() {
     super("native_disconnected", "The native host disconnected before the operation completed.");
+  }
+}
+
+export class NativeTimeoutError extends NativeClientError {
+  constructor() {
+    super("native_timeout", "The native helper stopped responding. Reload the extension and try again.");
   }
 }
 
@@ -180,6 +190,7 @@ export class NativeClient {
   private readonly terminalController = new AbortController();
   private readonly createRequestId: () => string;
   private readonly limits: NativeClientLimits;
+  private readonly requestTimeoutMs: number;
 
   constructor(
     private readonly port: NativePortAdapter,
@@ -187,6 +198,7 @@ export class NativeClient {
   ) {
     this.createRequestId = options.createRequestId ?? (() => crypto.randomUUID());
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.port.onMessage.addListener((message) => this.handleMessage(message));
     this.port.onDisconnect.addListener(() => this.handleDisconnect());
   }
@@ -221,7 +233,8 @@ export class NativeClient {
     }
 
     return new Promise<HostMessage>((resolve, reject) => {
-      this.pendingRequests.set(outgoing.requestId, { resolve, reject, request: outgoing });
+      const timeout = this.createResponseTimeout();
+      this.pendingRequests.set(outgoing.requestId, { resolve, reject, request: outgoing, timeout });
       try {
         this.port.postMessage(outgoing);
       } catch {
@@ -269,6 +282,7 @@ export class NativeClient {
       const pending: PendingChunk = {
         resolve,
         reject,
+        timeout: this.createResponseTimeout(),
         sessionId: chunk.sessionId,
         mediaId: chunk.mediaId,
         sequence: chunk.sequence,
@@ -405,6 +419,12 @@ export class NativeClient {
     this.terminate(new NativeDisconnectedError());
   }
 
+  private createResponseTimeout(): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      this.terminate(new NativeTimeoutError());
+    }, this.requestTimeoutMs);
+  }
+
   private nextRequestId(): string {
     const requestId = this.createRequestId();
     if (requestId.trim() === "") throw new NativeStateError("The request ID factory returned an empty ID.");
@@ -435,6 +455,7 @@ export class NativeClient {
         response.sequence === pending.sequence
       ) {
         this.pendingChunk = undefined;
+        clearTimeout(pending.timeout);
         pending.resolve(response);
       } else if (this.hasActiveSession() || this.hasPendingRequests()) {
         this.terminate(new NativeProtocolError("The native host returned an unexpected chunk acknowledgement."));
@@ -455,6 +476,7 @@ export class NativeClient {
       const pending = this.pendingChunk;
       if (pending !== undefined && response.sessionId === pending.sessionId) {
         this.pendingChunk = undefined;
+        clearTimeout(pending.timeout);
         pending.reject(error);
       } else if (this.hasActiveSession() || this.hasPendingRequests()) {
         this.terminate(new NativeProtocolError("The native host returned an uncorrelated error."));
@@ -515,6 +537,7 @@ export class NativeClient {
     const pending = this.pendingRequests.get(requestId);
     if (pending === undefined) return;
     this.pendingRequests.delete(requestId);
+    clearTimeout(pending.timeout);
     pending.resolve(response);
   }
 
@@ -522,13 +545,18 @@ export class NativeClient {
     const pending = this.pendingRequests.get(requestId);
     if (pending === undefined) return;
     this.pendingRequests.delete(requestId);
+    clearTimeout(pending.timeout);
     pending.reject(error);
   }
 
   private failAll(error: Error): void {
-    for (const pending of this.pendingRequests.values()) pending.reject(error);
+    for (const pending of this.pendingRequests.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
     this.pendingRequests.clear();
     if (this.pendingChunk !== undefined) {
+      clearTimeout(this.pendingChunk.timeout);
       this.pendingChunk.reject(error);
       this.pendingChunk = undefined;
     }

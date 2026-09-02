@@ -127,6 +127,12 @@ class FakeNativeClient {
     this.calls.push("abort_save");
     this.sessionId = undefined;
   }
+
+  close(): void {
+    this.calls.push("close");
+    this.sessionId = undefined;
+    this.isTerminal = true;
+  }
 }
 
 function directMedia(): ExtractedMedia {
@@ -157,6 +163,8 @@ function createCoordinator({
   fetcher = (async () => new Response(new Uint8Array([1]), { headers: { "content-type": "image/webp" } })) as typeof fetch,
   preflight,
   transfer,
+  extract = async () => extracted,
+  idleTimeoutMs,
 }: {
   native?: FakeNativeClient;
   status?: RecordingStatus;
@@ -165,24 +173,79 @@ function createCoordinator({
   fetcher?: typeof fetch;
   preflight?: (media: ExtractedMedia, fetcher: typeof fetch) => Promise<PreparedMedia>;
   transfer?: (prepared: PreparedMedia, client: NativeClient) => Promise<"saved" | "fallback">;
+  extract?: (tabId: number, tabUrl: string) => Promise<ExtractedArticle>;
+  idleTimeoutMs?: number;
 } = {}) {
   return {
     native,
     status,
     coordinator: new SaveCoordinator({
       loadSettings,
-      extract: async () => extracted,
+      extract,
       fetcher,
       nativeClient: native as never,
       status,
       createSessionId: () => SESSION_ID,
       preflight,
       transfer,
+      ...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),
     }),
   };
 }
 
 describe("SaveCoordinator", () => {
+  it("ends a stalled extraction with an actionable timeout error", async () => {
+    const status = new RecordingStatus();
+    const { coordinator } = createCoordinator({
+      status,
+      extract: async () => new Promise<ExtractedArticle>(() => {}),
+      idleTimeoutMs: 10,
+    });
+
+    const outcome = await Promise.race([
+      coordinator.save(1, "https://example.test/article"),
+      new Promise((resolve) => setTimeout(() => resolve({ status: "test_timeout" }), 100)),
+    ]);
+
+    expect(outcome).toMatchObject({
+      status: "error",
+      code: "save_timeout",
+      message: expect.stringContaining("extraction"),
+    });
+    expect(status.calls).toEqual(["saving", "error"]);
+  });
+
+  it("does not treat an actively progressing media transfer as a fixed wall-clock timeout", async () => {
+    const native = new FakeNativeClient();
+    const status = new RecordingStatus();
+    const { coordinator } = createCoordinator({
+      native,
+      status,
+      idleTimeoutMs: 10,
+      preflight: async (item) => ({
+        status: "eligible",
+        media: item,
+        response: new Response(null),
+        contentType: "image/webp",
+        declaredBytes: undefined,
+      }),
+      transfer: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return "saved";
+      },
+    });
+
+    const outcome = await Promise.race([
+      coordinator.save(1, "https://example.test/article"),
+      new Promise((resolve) => setTimeout(() => resolve({ status: "test_timeout" }), 100)),
+    ]);
+
+    expect(outcome).toMatchObject({ status: "success" });
+    expect(native.calls).not.toContain("close");
+    expect(native.isTerminal).toBe(false);
+    expect(status.calls).toEqual(["saving", "success"]);
+  });
+
   it("reports an unconfigured destination without opening a native session", async () => {
     const { coordinator, native, status } = createCoordinator({ loadSettings: async () => undefined });
 

@@ -27,6 +27,7 @@ const MAX_BMFF_DEPTH = 32;
 const MAX_MP4_SAMPLES = 1_000_000;
 const MAX_ILOC_ITEMS = 1_024;
 const MAX_ILOC_EXTENTS = 4_096;
+let nativeHostEnvironment = { PATH: "/usr/bin:/bin" };
 
 function fail(message) { throw new Error(message); }
 function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
@@ -384,7 +385,7 @@ function buildAcceptanceBinary() {
 
 function run(binary, messagesOrBytes) {
   const input = Buffer.isBuffer(messagesOrBytes) ? messagesOrBytes : Buffer.concat(messagesOrBytes.map(frame));
-  const result = spawnSync(binary, [], { input, encoding: null, env: { PATH: "/usr/bin:/bin" }, maxBuffer: 8 * 1024 * 1024 });
+  const result = spawnSync(binary, [], { input, encoding: null, env: nativeHostEnvironment, maxBuffer: 8 * 1024 * 1024 });
   if (result.error) throw result.error;
   return { status: result.status, stdout: result.stdout ?? Buffer.alloc(0), stderr: result.stderr ?? Buffer.alloc(0), messages: decodeFrames(result.stdout ?? Buffer.alloc(0)) };
 }
@@ -485,7 +486,7 @@ async function poisonCases(binary) {
 }
 
 function liveHost(binary) {
-  const child = spawn(binary, [], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: "/usr/bin:/bin" } });
+  const child = spawn(binary, [], { stdio: ["pipe", "pipe", "pipe"], env: nativeHostEnvironment });
   let buffered = Buffer.alloc(0); let stderr = Buffer.alloc(0); const waiters = []; const extras = [];
   function pump() {
     while (buffered.length >= 4) {
@@ -612,6 +613,11 @@ export async function nativeRoundtrip({ binary, faultBinary, destination } = {})
   const directBinary = await validateNativeBinary(binary ?? path.join(ROOT, "native/target/release/arthur-native-host"));
   const acceptanceBinary = await validateAcceptanceBinary(faultBinary ?? buildAcceptanceBinary());
   const ownsDestination = destination === undefined;
+  const hostHome = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "arthur-native-home-"));
+  const state = path.join(hostHome, "Library/Application Support/Arthur/state");
+  await fs.mkdir(state, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(state, "writer-id"), `${randomUUID()}\n`, { mode: 0o600 });
+  nativeHostEnvironment = { PATH: "/usr/bin:/bin", HOME: hostHome };
   const requestedRoot = destination === undefined ? await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "arthur-native-roundtrip-")) : path.resolve(destination);
   const { root } = await claimAcceptanceDestination(requestedRoot, { owned: ownsDestination });
   const canonicalRoot = await fs.realpath(root);
@@ -655,7 +661,11 @@ export async function nativeRoundtrip({ binary, faultBinary, destination } = {})
     const result = { acceptance: "native-roundtrip", binary: directBinary, faultBinary: acceptanceBinary, destination: root, fixtures: saved.pairs, collision: { expectedPath: collisionName, unrelatedSha256Before: sha256(unrelatedBefore), unrelatedSha256After: sha256(await fs.readFile(path.join(root, "Article.md"))) }, framing, interruption, trees: { before: beforeTree, after: afterTree }, checks: ["bytes", "overwrite", "collision", "warning", "limits", "symlink-race", "poison", "silent-eof", "pre-note-rename"] };
     completed = true;
     return result;
-  } finally { if (ownsDestination && completed) await fs.rm(root, { recursive: true, force: true }); }
+  } finally {
+    nativeHostEnvironment = { PATH: "/usr/bin:/bin" };
+    await fs.rm(hostHome, { recursive: true, force: true });
+    if (ownsDestination && completed) await fs.rm(root, { recursive: true, force: true });
+  }
 }
 
 function parseArguments(argv) {

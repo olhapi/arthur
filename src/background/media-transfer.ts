@@ -26,6 +26,54 @@ const STREAM_CONTENT_TYPES = new Set([
 ]);
 const FALLBACK_CHUNK_COUNT = Number.MAX_SAFE_INTEGER;
 const MIME_TYPE = /^[^/\s]+\/[^/\s]+$/;
+const DEFAULT_MEDIA_IDLE_TIMEOUT_MS = 30_000;
+
+class MediaIdleTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MediaIdleTimeoutError";
+  }
+}
+
+function withIdleDeadline<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number,
+  message: string,
+  onTimeout?: (error: MediaIdleTimeoutError) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const error = new MediaIdleTimeoutError(message);
+      onTimeout?.(error);
+      reject(error);
+    }, timeoutMs);
+
+    try {
+      void operation().then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          reject(error);
+        },
+      );
+    } catch (error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    }
+  });
+}
 
 function isMediaKind(kind: string): kind is NativeMediaKind {
   return kind === "image" || kind === "audio" || kind === "video";
@@ -56,17 +104,17 @@ function isStreamingUrl(value: string): boolean {
   }
 }
 
-async function discardResponse(response: Response): Promise<void> {
+function discardResponse(response: Response): void {
   try {
-    await response.body?.cancel();
+    void response.body?.cancel().catch(() => undefined);
   } catch {
     // A rejected response is already a remote fallback. Cancellation is only
     // resource cleanup and must not turn that recoverable outcome fatal.
   }
 }
 
-async function discardedFallback(response: Response, media: ExtractedMedia, code: string, message: string): Promise<PreparedMedia> {
-  await discardResponse(response);
+function discardedFallback(response: Response, media: ExtractedMedia, code: string, message: string): PreparedMedia {
+  discardResponse(response);
   return fallback(media, code, message);
 }
 
@@ -74,15 +122,28 @@ async function discardedFallback(response: Response, media: ExtractedMedia, code
  * Fetches only response headers and leaves an eligible body unread for the
  * session that will stream it to the native host.
  */
-export async function preflightMedia(media: ExtractedMedia, fetcher: typeof fetch): Promise<PreparedMedia> {
+export async function preflightMedia(
+  media: ExtractedMedia,
+  fetcher: typeof fetch,
+  idleTimeoutMs = DEFAULT_MEDIA_IDLE_TIMEOUT_MS,
+): Promise<PreparedMedia> {
   if (!isMediaKind(media.kind)) {
     return fallback(media, "unsupported_media", "The media type cannot be transferred.");
   }
 
   let response: Response;
+  const controller = new AbortController();
   try {
-    response = await fetcher(media.url);
-  } catch {
+    response = await withIdleDeadline(
+      () => fetcher(media.url, { signal: controller.signal }),
+      idleTimeoutMs,
+      "The media server stopped responding.",
+      (error) => controller.abort(error),
+    );
+  } catch (error) {
+    if (error instanceof MediaIdleTimeoutError) {
+      return fallback(media, "media_timeout", "The media server stopped responding.");
+    }
     return fallback(media, "media_fetch_failed", "The media could not be fetched.");
   }
   if (!response.ok) {
@@ -173,7 +234,12 @@ function cancelWithTerminal(reader: ReadableStreamDefaultReader<Uint8Array>, sig
   return raceWithTerminal(() => cancellation, signal);
 }
 
-async function streamChunks(response: Response, client: NativeClient, mediaId: string): Promise<number> {
+async function streamChunks(
+  response: Response,
+  client: NativeClient,
+  mediaId: string,
+  idleTimeoutMs: number,
+): Promise<number> {
   const body = response.body;
   if (body === null) return 0;
   const reader = body.getReader();
@@ -182,7 +248,11 @@ async function streamChunks(response: Response, client: NativeClient, mediaId: s
 
   try {
     while (true) {
-      const { done, value } = await raceWithTerminal(() => reader.read(), client.terminalSignal);
+      const { done, value } = await withIdleDeadline(
+        () => raceWithTerminal(() => reader.read(), client.terminalSignal),
+        idleTimeoutMs,
+        "The media response stopped producing data.",
+      );
       throwIfTerminal(client.terminalSignal);
       if (done) break;
       if (value === undefined || value.byteLength === 0) continue;
@@ -219,11 +289,19 @@ async function streamChunks(response: Response, client: NativeClient, mediaId: s
     }
     return sequence;
   } catch (error) {
-    try {
-      await cancelWithTerminal(reader, client.terminalSignal);
-    } catch {
-      // The original transfer error remains authoritative if cancellation
-      // races a network failure or an already-closed response stream.
+    if (error instanceof MediaIdleTimeoutError) {
+      try {
+        void reader.cancel().catch(() => undefined);
+      } catch {
+        // The timeout remains authoritative when stream cancellation fails.
+      }
+    } else {
+      try {
+        await cancelWithTerminal(reader, client.terminalSignal);
+      } catch {
+        // The original transfer error remains authoritative if cancellation
+        // races a network failure or an already-closed response stream.
+      }
     }
     throwIfTerminal(client.terminalSignal);
     throw error;
@@ -238,7 +316,11 @@ async function streamChunks(response: Response, client: NativeClient, mediaId: s
  * impossible chunk count so the native Vault records its remote fallback and
  * keeps the article transaction committable.
  */
-export async function transferMedia(prepared: PreparedMedia, client: NativeClient): Promise<"saved" | "fallback"> {
+export async function transferMedia(
+  prepared: PreparedMedia,
+  client: NativeClient,
+  idleTimeoutMs = DEFAULT_MEDIA_IDLE_TIMEOUT_MS,
+): Promise<"saved" | "fallback"> {
   if (prepared.status === "fallback") return "fallback";
 
   let begun = false;
@@ -254,7 +336,7 @@ export async function transferMedia(prepared: PreparedMedia, client: NativeClien
       declaredBytes: prepared.declaredBytes,
     });
     begun = true;
-    const chunks = await streamChunks(prepared.response, client, prepared.media.id);
+    const chunks = await streamChunks(prepared.response, client, prepared.media.id, idleTimeoutMs);
     const completion = await client.endMedia(prepared.media.id, chunks);
     return completion.type === "warning" ? "fallback" : "saved";
   } catch (error) {

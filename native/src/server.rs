@@ -15,6 +15,20 @@ pub fn run_native_host<R: Read, W: Write, E: Write>(
     run_native_host_with_sessions(input, output, diagnostics, SessionManager::new())
 }
 
+pub fn run_native_host_with_writer<R: Read, W: Write, E: Write>(
+    input: R,
+    output: W,
+    diagnostics: E,
+    writer_id: &str,
+) -> io::Result<()> {
+    run_native_host_with_sessions(
+        input,
+        output,
+        diagnostics,
+        SessionManager::with_writer_id(writer_id),
+    )
+}
+
 #[cfg(feature = "acceptance-faults")]
 pub fn run_native_host_before_note_rename_fault<R: Read, W: Write, E: Write>(
     input: R,

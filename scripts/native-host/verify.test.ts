@@ -57,7 +57,11 @@ describe("native-host verification", () => {
     const { home, plan } = await installedFixture();
     const spawn = spawning({ type: "hello_result", requestId: "verify-hello", protocolVersion: 1, hostName: "Arthur native host", hostVersion: "0.1.0" });
     await expect(verifyInstall({ home, platform: "darwin", spawn })).resolves.toMatchObject({ installed: true });
-    expect(spawn).toHaveBeenCalledWith(plan.payloads[0]!.destination, [], expect.objectContaining({ env: { PATH: "/usr/bin:/bin" } }));
+    expect(spawn).toHaveBeenCalledWith(
+      plan.payloads[0]!.destination,
+      [],
+      expect.objectContaining({ env: { PATH: "/usr/bin:/bin", HOME: await realpath(home) } }),
+    );
   });
 
   it("rejects malformed host output and only accepts complete absence when requested", async () => {

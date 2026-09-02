@@ -752,13 +752,15 @@ impl VaultTransaction {
     }
 
     fn note_target(&self) -> Result<(String, Option<frontmatter::ExistingArticle>), VaultError> {
-        if let Some(existing) =
-            frontmatter::find_existing_article(&self.destination, &self.save.source)?
-        {
-            return Ok((existing.name.clone(), Some(existing)));
-        }
         let stem = sanitize_stem(&self.save.title);
         let direct = format!("{stem}.md");
+        if let Some(existing) = frontmatter::find_existing_article_preferred(
+            &self.destination,
+            &self.save.source,
+            Some(&direct),
+        )? {
+            return Ok((existing.name.clone(), Some(existing)));
+        }
         if !fs::child_exists(&self.destination, &direct)? {
             return Ok((direct, None));
         }
@@ -772,9 +774,16 @@ impl VaultTransaction {
         }
         let markdown = self.rendered_markdown()?;
         self.install_attachments()?;
-        let serialized =
-            frontmatter::serialize_note(&self.save.title, &self.save.source, &markdown)?;
         let (target, existing) = self.note_target()?;
+        let serialized = frontmatter::serialize_note_preserving(
+            &self.save.title,
+            &self.save.source,
+            existing
+                .as_ref()
+                .map(|article| article.additional_frontmatter.as_str())
+                .unwrap_or(""),
+            &markdown,
+        )?;
         let new_fingerprint = self.slot.write_new_note(serialized.as_bytes())?;
         if self.fault_before_note_rename() {
             return Err(VaultError::Io);
@@ -1122,6 +1131,7 @@ impl VaultTransaction {
             let visible = self
                 .canonical_destination
                 .join(workspace::WORKSPACE_NAME)
+                .join(workspace::DEFAULT_WRITER_ID)
                 .join(format!("slot-{}", self.slot.index()))
                 .join(_temporary);
             let displaced = self
@@ -1438,7 +1448,10 @@ mod tests {
             b"test",
         )
         .unwrap();
-        let stage = destination.join(workspace::WORKSPACE_NAME).join("slot-0");
+        let stage = destination
+            .join(workspace::WORKSPACE_NAME)
+            .join(workspace::DEFAULT_WRITER_ID)
+            .join("slot-0");
         let mut transaction = Vault::open(&destination)
             .unwrap()
             .begin(save(&format!("arthur-media://{MEDIA_ID}")))
@@ -1507,7 +1520,10 @@ mod tests {
             fs::create_dir(destination.join("attachments")).unwrap();
             let target = destination.join("attachments").join(&expected_name);
             fs::write(&target, b"test").unwrap();
-            let stage = destination.join(workspace::WORKSPACE_NAME).join("slot-0");
+            let stage = destination
+                .join(workspace::WORKSPACE_NAME)
+                .join(workspace::DEFAULT_WRITER_ID)
+                .join("slot-0");
             let mut transaction = Vault::open(&destination)
                 .unwrap()
                 .begin(save(&format!("arthur-media://{MEDIA_ID}")))
@@ -1733,7 +1749,10 @@ mod tests {
             .begin(save("body"))
             .unwrap();
         transaction.next_media = workspace::MAX_MEDIA_PER_SAVE;
-        let slot = destination.join(workspace::WORKSPACE_NAME).join("slot-0");
+        let slot = destination
+            .join(workspace::WORKSPACE_NAME)
+            .join(workspace::DEFAULT_WRITER_ID)
+            .join("slot-0");
         let before = fs::read_dir(&slot).unwrap().count();
         assert_eq!(
             transaction.begin_media(MediaSpec {
@@ -1812,7 +1831,9 @@ mod tests {
             Err(VaultError::Io)
         );
 
-        let workspace = destination.join(workspace::WORKSPACE_NAME);
+        let workspace = destination
+            .join(workspace::WORKSPACE_NAME)
+            .join(workspace::DEFAULT_WRITER_ID);
         let target = destination.join("Article.md");
         let displaced = destination.join("displaced-article");
         let backup = workspace.join("slot-0").join(workspace::OLD_BACKUP);
@@ -1849,7 +1870,9 @@ mod tests {
             Err(VaultError::Io)
         );
 
-        let workspace = destination.join(workspace::WORKSPACE_NAME);
+        let workspace = destination
+            .join(workspace::WORKSPACE_NAME)
+            .join(workspace::DEFAULT_WRITER_ID);
         let target = destination.join("Article.md");
         let displaced = destination.join("displaced-article");
         let backup = workspace.join("slot-0").join(workspace::OLD_BACKUP);
@@ -1883,7 +1906,9 @@ mod tests {
             Err(VaultError::Io)
         );
 
-        let workspace = destination.join(workspace::WORKSPACE_NAME);
+        let workspace = destination
+            .join(workspace::WORKSPACE_NAME)
+            .join(workspace::DEFAULT_WRITER_ID);
         let target = destination.join("Article.md");
         let displaced = destination.join("displaced-article");
         let backup = workspace.join("slot-0").join(workspace::OLD_BACKUP);
@@ -1948,7 +1973,10 @@ mod tests {
                 .unwrap()
                 .contains("new body")
         );
-        let slot = destination.join(workspace::WORKSPACE_NAME).join("slot-0");
+        let slot = destination
+            .join(workspace::WORKSPACE_NAME)
+            .join(workspace::DEFAULT_WRITER_ID)
+            .join("slot-0");
         assert_eq!(fs::read(slot.join(workspace::NEW_NOTE)).unwrap(), b"");
         assert_eq!(fs::read(slot.join(workspace::OLD_BACKUP)).unwrap(), b"");
         Vault::open(&destination)
@@ -1975,7 +2003,10 @@ mod tests {
                 .unwrap()
                 .contains("new body")
         );
-        let slot = destination.join(workspace::WORKSPACE_NAME).join("slot-0");
+        let slot = destination
+            .join(workspace::WORKSPACE_NAME)
+            .join(workspace::DEFAULT_WRITER_ID)
+            .join("slot-0");
         assert_eq!(fs::read(slot.join(workspace::NEW_NOTE)).unwrap(), old);
         assert_eq!(fs::read(slot.join(workspace::OLD_BACKUP)).unwrap(), old);
 
@@ -2007,6 +2038,7 @@ mod tests {
             fs::read(
                 destination
                     .join(workspace::WORKSPACE_NAME)
+                    .join(workspace::DEFAULT_WRITER_ID)
                     .join("slot-0")
                     .join(workspace::OLD_BACKUP)
             )
@@ -2036,6 +2068,7 @@ mod tests {
             fs::symlink_metadata(
                 destination
                     .join(workspace::WORKSPACE_NAME)
+                    .join(workspace::DEFAULT_WRITER_ID)
                     .join("slot-0")
                     .join(workspace::OLD_BACKUP)
             )

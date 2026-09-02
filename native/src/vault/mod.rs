@@ -42,6 +42,10 @@ pub struct Vault {
 }
 impl Vault {
     pub fn open(destination: &Path) -> Result<Self, VaultError> {
+        Self::open_for_writer(destination, workspace::DEFAULT_WRITER_ID)
+    }
+
+    pub fn open_for_writer(destination: &Path, writer_id: &str) -> Result<Self, VaultError> {
         if !destination.is_absolute() {
             return Err(VaultError::InvalidDestination);
         }
@@ -53,7 +57,7 @@ impl Vault {
         }
         let destination = fs::open_destination(&canonical_destination)?;
         let attachments = fs::open_or_create_child_directory(&destination, "attachments")?;
-        let workspace = workspace::Workspace::open(&destination)?;
+        let workspace = workspace::Workspace::open_for_writer(&destination, writer_id)?;
         Ok(Self {
             destination,
             attachments,
@@ -62,7 +66,11 @@ impl Vault {
         })
     }
     pub fn probe(destination: &Path) -> Result<VaultProbe, VaultError> {
-        let vault = Self::open(destination)?;
+        Self::probe_for_writer(destination, workspace::DEFAULT_WRITER_ID)
+    }
+
+    pub fn probe_for_writer(destination: &Path, writer_id: &str) -> Result<VaultProbe, VaultError> {
+        let vault = Self::open_for_writer(destination, writer_id)?;
         fs::write_probe(&vault.destination)?;
         Ok(VaultProbe {
             canonical_destination: vault.canonical_destination.clone(),

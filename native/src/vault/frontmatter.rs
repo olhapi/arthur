@@ -11,6 +11,17 @@ pub(super) struct ExistingArticle {
     pub name: String,
     pub fingerprint: fs::FileFingerprint,
     pub verified_file: File,
+    pub additional_frontmatter: String,
+}
+
+struct ArthurFrontmatter {
+    source: String,
+    additional: String,
+}
+
+enum ReservedField {
+    Title,
+    Source,
 }
 
 fn take_line(value: &str) -> Option<(&str, &str)> {
@@ -18,28 +29,70 @@ fn take_line(value: &str) -> Option<(&str, &str)> {
     Some((line.strip_suffix('\r').unwrap_or(line), rest))
 }
 
-fn take_json_field<'a>(value: &'a str, name: &str) -> Option<(String, &'a str)> {
-    let (line, rest) = take_line(value)?;
+fn parse_json_field(line: &str, name: &str) -> Option<String> {
     let field = line.strip_prefix(name)?;
     if !(field.starts_with('"') && field.ends_with('"')) {
         return None;
     }
-    serde_json::from_str(field).ok().map(|field| (field, rest))
+    serde_json::from_str(field).ok()
 }
 
-fn source_from_arthur_frontmatter(value: &str) -> Option<String> {
-    let (opening, rest) = take_line(value)?;
+fn reserved_field(line: &str) -> Option<ReservedField> {
+    if line.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let (key, _) = line.split_once(':')?;
+    let key = key.trim_end();
+    let key = key
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            key.strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(key);
+    match key {
+        "title" => Some(ReservedField::Title),
+        "source" => Some(ReservedField::Source),
+        _ => None,
+    }
+}
+
+fn parse_arthur_frontmatter(value: &str) -> Option<ArthurFrontmatter> {
+    let (opening, mut rest) = take_line(value)?;
     if opening != "---" {
         return None;
     }
-    let (_, rest) = take_json_field(rest, "title: ")?;
-    let (source, rest) = take_json_field(rest, "source: ")?;
-    let (closing, rest) = take_line(rest)?;
-    if closing != "---" || !(rest.is_empty() || rest.starts_with('\n') || rest.starts_with("\r\n"))
-    {
-        return None;
+    let mut has_title = false;
+    let mut source = None;
+    let mut additional = String::new();
+    loop {
+        let (line, next) = take_line(rest)?;
+        if line == "---" {
+            if !(next.is_empty() || next.starts_with('\n') || next.starts_with("\r\n")) {
+                return None;
+            }
+            return Some(ArthurFrontmatter {
+                source: source?,
+                additional: has_title.then_some(additional)?,
+            });
+        }
+        if matches!(reserved_field(line), Some(ReservedField::Title)) {
+            if has_title || parse_json_field(line, "title: ").is_none() {
+                return None;
+            }
+            has_title = true;
+        } else if matches!(reserved_field(line), Some(ReservedField::Source)) {
+            if source.is_some() {
+                return None;
+            }
+            source = Some(parse_json_field(line, "source: ")?);
+        } else {
+            additional.push_str(line);
+            additional.push('\n');
+        }
+        rest = next;
     }
-    Some(source)
 }
 
 #[allow(dead_code)]
@@ -47,8 +100,19 @@ pub(super) fn find_existing_article(
     destination: &OwnedFd,
     incoming_source: &str,
 ) -> Result<Option<ExistingArticle>, VaultError> {
+    find_existing_article_preferred(destination, incoming_source, None)
+}
+
+pub(super) fn find_existing_article_preferred(
+    destination: &OwnedFd,
+    incoming_source: &str,
+    preferred_name: Option<&str>,
+) -> Result<Option<ExistingArticle>, VaultError> {
     let incoming_source = normalize_source(incoming_source)?;
-    for name in fs::direct_children(destination)? {
+    let mut names = fs::direct_children(destination)?;
+    names.sort();
+    let mut fallback = None;
+    for name in names {
         if !name.ends_with(".md") {
             continue;
         }
@@ -61,23 +125,30 @@ pub(super) fn find_existing_article(
         let Ok(contents) = std::str::from_utf8(&bytes) else {
             continue;
         };
-        let Some(stored_source) = source_from_arthur_frontmatter(contents) else {
+        let Some(frontmatter) = parse_arthur_frontmatter(contents) else {
             continue;
         };
-        if normalize_source(&stored_source).is_ok_and(|source| source == incoming_source) {
+        if normalize_source(&frontmatter.source).is_ok_and(|source| source == incoming_source) {
             let fingerprint = match fs::fingerprint_open_regular_file(&mut file) {
                 Ok(fingerprint) => fingerprint,
                 Err(VaultError::UnsafeChild) => return Err(VaultError::SourceConflict),
                 Err(error) => return Err(error),
             };
-            return Ok(Some(ExistingArticle {
+            let existing = ExistingArticle {
                 name,
                 fingerprint,
                 verified_file: file,
-            }));
+                additional_frontmatter: frontmatter.additional,
+            };
+            if preferred_name.is_some_and(|preferred| preferred == existing.name) {
+                return Ok(Some(existing));
+            }
+            if fallback.is_none() {
+                fallback = Some(existing);
+            }
         }
     }
-    Ok(None)
+    Ok(fallback)
 }
 
 pub(super) fn verifies_existing_article_source(
@@ -115,15 +186,24 @@ pub(super) fn verifies_existing_article_source(
     let Ok(contents) = std::str::from_utf8(&bytes) else {
         return Ok(false);
     };
-    let Some(stored_source) = source_from_arthur_frontmatter(contents) else {
+    let Some(frontmatter) = parse_arthur_frontmatter(contents) else {
         return Ok(false);
     };
-    Ok(normalize_source(&stored_source).is_ok_and(|source| source == incoming_source))
+    Ok(normalize_source(&frontmatter.source).is_ok_and(|source| source == incoming_source))
 }
 #[allow(dead_code)]
 pub(super) fn serialize_note(
     title: &str,
     source: &str,
+    markdown: &str,
+) -> Result<String, VaultError> {
+    serialize_note_preserving(title, source, "", markdown)
+}
+
+pub(super) fn serialize_note_preserving(
+    title: &str,
+    source: &str,
+    additional_frontmatter: &str,
     markdown: &str,
 ) -> Result<String, VaultError> {
     if title.is_empty() {
@@ -132,9 +212,10 @@ pub(super) fn serialize_note(
     let source = normalize_source(source)?;
     let markdown = markdown.replace("\r\n", "\n").replace('\r', "\n");
     Ok(format!(
-        "---\ntitle: {}\nsource: {}\n---\n\n{}",
+        "---\ntitle: {}\nsource: {}\n{}---\n\n{}",
         serde_json::to_string(title).map_err(|_| VaultError::InvalidName)?,
         serde_json::to_string(&source).map_err(|_| VaultError::InvalidSource)?,
+        additional_frontmatter,
         markdown
     ))
 }
@@ -262,6 +343,30 @@ mod tests {
     }
 
     #[test]
+    fn matches_bounded_custom_frontmatter_around_the_arthur_identity_fields() {
+        let destination = temp();
+        let source = "https://example.com/a";
+        fs::write(
+            destination.join("custom-metadata.md"),
+            "---\n# user metadata\ntags:\n  - topic/testing\ntitle: \"Article\"\naliases: [Example]\nsource: \"https://example.com/a\"\n---\n\nBody",
+        )
+        .unwrap();
+        let vault = Vault::open(&destination).unwrap();
+
+        let article = find_existing_article(&vault.destination, source)
+            .unwrap()
+            .unwrap();
+        assert_eq!(article.name, "custom-metadata.md");
+        assert_eq!(
+            article.additional_frontmatter,
+            "# user metadata\ntags:\n  - topic/testing\naliases: [Example]\n"
+        );
+
+        drop(vault);
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
     fn ignores_nested_symlinked_malformed_non_arthur_and_unbounded_candidates() {
         let destination = temp();
         let outside = temp();
@@ -280,8 +385,23 @@ mod tests {
         std::os::unix::fs::symlink(outside.join("source.md"), destination.join("linked.md"))
             .unwrap();
         fs::write(
-            destination.join("extra-field.md"),
-            "---\ntitle: \"Article\"\nsource: \"https://example.com/a\"\ntags: []\n---\n\nBody",
+            destination.join("duplicate-title.md"),
+            "---\ntitle: \"Article\"\nsource: \"https://example.com/a\"\ntitle: \"Substitute\"\n---\n\nBody",
+        )
+        .unwrap();
+        fs::write(
+            destination.join("duplicate-source.md"),
+            "---\ntitle: \"Article\"\nsource: \"https://example.com/a\"\nsource: \"https://attacker.example/a\"\n---\n\nBody",
+        )
+        .unwrap();
+        fs::write(
+            destination.join("duplicate-spaced-title.md"),
+            "---\ntitle: \"Article\"\nsource: \"https://example.com/a\"\ntitle : \"Substitute\"\n---\n\nBody",
+        )
+        .unwrap();
+        fs::write(
+            destination.join("duplicate-quoted-source.md"),
+            "---\ntitle: \"Article\"\nsource: \"https://example.com/a\"\n\"source\": \"https://attacker.example/a\"\n---\n\nBody",
         )
         .unwrap();
         fs::write(

@@ -1,6 +1,6 @@
 import { browser } from "wxt/browser";
 
-import { connectNativeClient } from "../../src/background/native-client.js";
+import { connectNativeClient, NativeClientError } from "../../src/background/native-client.js";
 import { ArthurSettingsSchema, type ArthurSettings } from "../../src/shared/settings.js";
 
 export interface OptionsStorage {
@@ -11,6 +11,7 @@ export interface OptionsStorage {
 export interface ConnectionStatus {
   kind: "success" | "error";
   message: string;
+  code?: string;
 }
 
 export interface ConnectionResult {
@@ -203,10 +204,13 @@ export async function testNativeConnection(
         ? { kind: "success", message: "Destination is writable." }
         : { kind: "error", message: "Destination is not writable." },
     };
-  } catch {
+  } catch (error) {
     return {
       host: { kind: "success", message: "Native host available." },
-      folder: { kind: "error", message: "Destination could not be checked." },
+      folder:
+        error instanceof NativeClientError
+          ? { kind: "error", code: error.code, message: error.message }
+          : { kind: "error", message: "Destination could not be checked." },
     };
   } finally {
     client?.close();

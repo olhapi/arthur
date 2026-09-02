@@ -2,6 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { NativeHostError } from "../../src/background/native-client.js";
 import { chooseNativeDestination, mountOptionsPage, testNativeConnection } from "./main.js";
 
 function optionsDocument(): Document {
@@ -154,6 +155,31 @@ describe("mountOptionsPage", () => {
 });
 
 describe("testNativeConnection", () => {
+  it("returns a responsive native destination error immediately with its code and message", async () => {
+    const client = {
+      hello: vi.fn().mockResolvedValue({ type: "hello_result" }),
+      request: vi.fn().mockRejectedValue(
+        new NativeHostError("unsafe_child", "The destination contains unsafe Arthur workspace state."),
+      ),
+      close: vi.fn(),
+    };
+
+    const result = await Promise.race([
+      testNativeConnection("/Vault/Denied", () => client),
+      new Promise((resolve) => setTimeout(() => resolve("sentinel"), 100)),
+    ]);
+
+    expect(result).toEqual({
+      host: { kind: "success", message: "Native host available." },
+      folder: {
+        kind: "error",
+        code: "unsafe_child",
+        message: "The destination contains unsafe Arthur workspace state.",
+      },
+    });
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
   it("keeps the host available when only destination testing fails", async () => {
     const client = {
       hello: vi.fn().mockResolvedValue({ type: "hello_result" }),

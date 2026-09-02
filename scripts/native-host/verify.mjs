@@ -3,7 +3,7 @@ import * as nodeFs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { FIREFOX_EXTENSION_ID, NATIVE_HOST_NAME, assertRegularNonSymlink, canonicalizeHome, nativeHostTargets, validateDirectoryChain } from "./install.mjs";
+import { FIREFOX_EXTENSION_ID, NATIVE_HOST_NAME, assertRegularNonSymlink, canonicalizeHome, nativeHostTargets, readWriterIdentity, validateDirectoryChain } from "./install.mjs";
 import { CHROME_WEB_STORE_EXTENSION_ID, CHROMIUM_EXTENSION_ID } from "./identity.mjs";
 
 const MINIMAL_ENV = { PATH: "/usr/bin:/bin" };
@@ -54,9 +54,9 @@ function parseSingleFrame(bytes) {
   try { return JSON.parse(text); } catch { throw new Error("Native host returned malformed JSON."); }
 }
 
-export function requestHost(spawn, binary, request) {
+export function requestHost(spawn, binary, request, environment = MINIMAL_ENV) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, [], { env: MINIMAL_ENV, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(binary, [], { env: environment, stdio: ["pipe", "pipe", "pipe"] });
     const stdout = [];
     const stderr = [];
     const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -108,7 +108,7 @@ export function requestHost(spawn, binary, request) {
 }
 
 async function assertAbsent(fs, home, targets) {
-  for (const target of Object.values(targets)) {
+  for (const target of [targets.binary, targets.chrome, targets.edge, targets.firefox]) {
     try {
       await validateDirectoryChain(fs, home, path.dirname(target));
       await fs.lstat(target);
@@ -132,19 +132,22 @@ export async function verifyInstall({ home, platform, destination, expectAbsent 
   await readManifest(fs, canonicalHome, targets.edge, expectedManifest(targets.binary, "chromium"), "Edge manifest");
   await readManifest(fs, canonicalHome, targets.firefox, expectedManifest(targets.binary, "firefox"), "Firefox manifest");
   await assertRegularNonSymlink(fs, targets.binary, "Installed native-host binary");
+  await validateDirectoryChain(fs, canonicalHome, path.dirname(targets.writerId));
+  await readWriterIdentity(fs, targets.writerId);
   const binaryStat = await fs.lstat(targets.binary);
   if ((binaryStat.mode & 0o777) !== 0o755) throw new Error("Installed native-host binary must have mode 0755.");
   await validateDirectoryChain(fs, canonicalHome, path.dirname(targets.binary));
   const nativeFiles = await fs.readdir(path.dirname(targets.binary));
   if (nativeFiles.length !== 1 || nativeFiles[0] !== "arthur-native-host") throw new Error("Native-host directory must contain exactly one binary.");
-  const hello = await requestHost(spawn, targets.binary, { type: "hello", requestId: "verify-hello", protocolVersion: 1 });
+  const hostEnvironment = { ...MINIMAL_ENV, HOME: canonicalHome };
+  const hello = await requestHost(spawn, targets.binary, { type: "hello", requestId: "verify-hello", protocolVersion: 1 }, hostEnvironment);
   if (!hello || hello.type !== "hello_result" || hello.requestId !== "verify-hello" || hello.protocolVersion !== 1 || hello.hostName !== "Arthur native host" || typeof hello.hostVersion !== "string") {
     throw new Error("Native host returned an invalid hello response.");
   }
   if (destination === undefined) return { installed: true };
   if (!path.isAbsolute(destination)) throw new Error("Destination test path must be absolute.");
   const normalizedDestination = await fs.realpath(path.resolve(destination));
-  const result = await requestHost(spawn, targets.binary, { type: "test_destination", requestId: "verify-destination", destination: normalizedDestination });
+  const result = await requestHost(spawn, targets.binary, { type: "test_destination", requestId: "verify-destination", destination: normalizedDestination }, hostEnvironment);
   if (!result || result.type !== "test_destination_result" || result.requestId !== "verify-destination" || result.destination !== normalizedDestination || result.writable !== true) {
     throw new Error("Native host destination test did not confirm the exact writable destination.");
   }

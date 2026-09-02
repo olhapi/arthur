@@ -161,6 +161,22 @@ function trackReaderReleases(body: ReadableStream<Uint8Array>): () => number {
 }
 
 describe("preflightMedia", () => {
+  it("aborts a fetch that does not return headers before the idle deadline", async () => {
+    let aborted = false;
+    const fetcher = ((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        aborted = true;
+        reject(init.signal?.reason);
+      }, { once: true });
+    })) as typeof fetch;
+
+    await expect(preflightMedia(media(), fetcher, 10)).resolves.toMatchObject({
+      status: "fallback",
+      code: "media_timeout",
+    });
+    expect(aborted).toBe(true);
+  });
+
   it("rejects a known individual limit before a save begins", async () => {
     const result = await preflightMedia(
       media(),
@@ -214,9 +230,55 @@ describe("preflightMedia", () => {
     });
     expect(cancelled).toBe(true);
   });
+
+  it("does not wait for rejected-response cancellation to settle", async () => {
+    const response = new Response(new ReadableStream<Uint8Array>({
+      cancel: () => new Promise<void>(() => {}),
+    }), {
+      headers: {
+        "content-type": "image/webp",
+        "content-length": String(MEDIA_LIMITS.image + 1),
+      },
+    });
+
+    const outcome = await Promise.race([
+      preflightMedia(media(), (async () => response) as typeof fetch),
+      new Promise((resolve) => setTimeout(() => resolve({ status: "test_timeout" }), 100)),
+    ]);
+
+    expect(outcome).toMatchObject({ status: "fallback", code: "media_limit_exceeded" });
+  });
 });
 
 describe("transferMedia", () => {
+  it("falls back when a response body stops producing data before the idle deadline", async () => {
+    const port = new TransferPort();
+    port.fallbackOnEnd = true;
+    const client = await activeClient(port);
+    const body = new ReadableStream<Uint8Array>({ pull: () => new Promise<void>(() => {}) });
+
+    await expect(transferMedia(prepared(new Response(body)), client, 10)).resolves.toBe("fallback");
+    expect(port.posted.find((message) => message.type === "end_media")).toMatchObject({
+      chunks: Number.MAX_SAFE_INTEGER,
+    });
+  });
+
+  it("allows total transfer time to exceed the idle deadline while every read keeps progressing", async () => {
+    const port = new TransferPort();
+    const client = await activeClient(port);
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        if (pulls === 3) controller.close();
+        else controller.enqueue(new Uint8Array([++pulls]));
+      },
+    });
+
+    await expect(transferMedia(prepared(new Response(body)), client, 25)).resolves.toBe("saved");
+    expect(port.posted.filter((message) => message.type === "media_chunk")).toHaveLength(1);
+  });
+
   it("uses one in-flight 256 KiB chunk at a time with ordered sequences", async () => {
     const port = new TransferPort();
     port.acknowledgeChunks = false;

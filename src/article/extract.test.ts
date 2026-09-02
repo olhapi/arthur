@@ -130,6 +130,40 @@ describe("extractArticle", () => {
     expect(article.markdown).toContain("I did the same thing there, helped and taught others as much as possible.");
   });
 
+  it("retains all Substack headings from a fully rendered post without a paywall marker", () => {
+    const paragraphs = "<p>Demand for good engineering managers is increasing because great managers need a broad and balanced set of skills to guide their teams well.</p>".repeat(28);
+    const document = new DOMParser().parseFromString(
+      `<!doctype html><html><head><title>Effective OKRs</title></head><body>
+        <article class="typography newsletter-post post">
+          <div class="post-header"><h1>3 tips for effective OKRs for your engineering team</h1></div>
+          <div class="dt-post-body"><div class="available-content"><div class="body markup">
+            <h2 class="header-anchor-post">Intro<div class="header-anchor-parent"><div id="§intro" class="header-anchor offset-top"></div><button type="button" aria-label="Link">Link</button></div></h2>
+            ${paragraphs}
+            <h2 class="header-anchor-post">Align your OKRs with your company’s objectives</h2>
+            <p>Connect the team goals to company outcomes.</p>
+            <h2 class="header-anchor-post">Define clear and measurable objectives with a focus on key results</h2>
+            <p>Make success measurable.</p>
+            <h2 class="header-anchor-post">Make it Collaborative</h2>
+            <p>Write objectives with the team.</p>
+            <h2 class="header-anchor-post">Last words</h2>
+            <p>Review and learn.</p>
+            <h2 class="header-anchor-post">Get in touch</h2>
+          </div></div></div>
+        </article>
+      </body></html>`,
+      "text/html",
+    );
+
+    const article = extractArticle(document, "https://newsletter.eng-leadership.com/p/3-tips-for-effective-okrs-for-your");
+
+    expect(article.markdown).toContain("## Intro");
+    expect(article.markdown).toContain("## Align your OKRs with your company’s objectives");
+    expect(article.markdown).toContain("## Define clear and measurable objectives with a focus on key results");
+    expect(article.markdown).toContain("## Make it Collaborative");
+    expect(article.markdown).toContain("## Last words");
+    expect(article.markdown).toContain("## Get in touch");
+  });
+
   it("unwraps a linked downloadable image into a local attachment embed", () => {
     const imageId = "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832";
     const document = new DOMParser().parseFromString(

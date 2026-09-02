@@ -7,7 +7,8 @@ use std::{
     os::fd::OwnedFd,
 };
 
-pub(super) const WORKSPACE_NAME: &str = ".arthur-workspace-v1";
+pub(super) const WORKSPACE_NAME: &str = ".arthur-workspace-v2";
+pub(super) const DEFAULT_WRITER_ID: &str = "00000000-0000-4000-8000-000000000000";
 pub(super) const SLOT_COUNT: usize = 4;
 pub(super) const MAX_MEDIA_PER_SAVE: usize = 4096;
 const WORKSPACE_OWNER: &str = "owner";
@@ -16,7 +17,8 @@ const JOURNAL_B: &str = "journal-b";
 pub(super) const NEW_NOTE: &str = "new-note";
 pub(super) const OLD_BACKUP: &str = "old-backup";
 const MAX_JOURNAL_BYTES: usize = 1024 * 1024;
-const WORKSPACE_MARKER: &[u8] = b"arthur-workspace-owner-v1\nslots=4\nmedia=4096\n";
+const ROOT_MARKER: &[u8] = b"arthur-workspace-root-v2\n";
+const WORKSPACE_MARKER: &[u8] = b"arthur-writer-workspace-v2\nslots=4\nmedia=4096\n";
 
 #[cfg(test)]
 thread_local! {
@@ -61,6 +63,8 @@ struct JournalEnvelope {
 pub(super) struct Slot {
     index: usize,
     root: OwnedFd,
+    shared_workspace: OwnedFd,
+    writer_id: String,
     workspace: OwnedFd,
     workspace_owner: File,
     pub directory: OwnedFd,
@@ -109,11 +113,11 @@ fn note_state(
             Err(_) => return NoteState::Unsafe,
         },
     };
-    if old.is_some_and(|value| fingerprint == *value) {
+    if old.is_some_and(|value| same_content(&fingerprint, value)) {
         NoteState::Old
-    } else if backup.is_some_and(|value| fingerprint == *value) {
+    } else if backup.is_some_and(|value| same_content(&fingerprint, value)) {
         NoteState::Backup
-    } else if fingerprint == *new {
+    } else if same_content(&fingerprint, new) {
         NoteState::New
     } else {
         NoteState::Unknown
@@ -122,6 +126,21 @@ fn note_state(
 
 fn slot_name(index: usize) -> String {
     format!("slot-{index}")
+}
+
+fn valid_writer_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            [8, 13, 18, 23].contains(&index)
+                || byte.is_ascii_digit()
+                || (b'a'..=b'f').contains(byte)
+        })
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
 }
 
 fn slot_marker(index: usize) -> Vec<u8> {
@@ -178,7 +197,6 @@ fn valid_journal_semantics(payload: &JournalPayload) -> bool {
             .media
             .keys()
             .all(|index| *index < MAX_MEDIA_PER_SAVE)
-        && fixed_identities_are_distinct(payload)
         && match payload.phase {
             JournalPhase::Empty | JournalPhase::Preparing => {
                 payload.target.is_none()
@@ -197,36 +215,12 @@ fn valid_journal_semantics(payload: &JournalPayload) -> bool {
                 {
                     return false;
                 }
-                let new_matches_fixed_note = fingerprint_matches_identity(new, &payload.new_note);
-                let valid_new_phase_identity = match payload.phase {
-                    JournalPhase::ExchangePending => new_matches_fixed_note,
-                    JournalPhase::Committed => {
-                        !fingerprint_matches_any_fixed_identity(new, payload)
-                    }
-                    JournalPhase::Empty | JournalPhase::Preparing => false,
-                };
-                if !valid_new_phase_identity {
-                    return false;
-                }
                 match (payload.old.as_ref(), payload.backup.as_ref()) {
                     (None, None) => true,
                     (Some(old), Some(backup)) => {
                         valid_fingerprint(old)
                             && valid_fingerprint(backup)
                             && same_content(old, backup)
-                            && !same_fingerprint_identity(old, backup)
-                            && !same_fingerprint_identity(new, old)
-                            && !same_fingerprint_identity(new, backup)
-                            && fingerprint_matches_identity(backup, &payload.old_backup)
-                            && match payload.phase {
-                                JournalPhase::ExchangePending => {
-                                    !fingerprint_matches_any_fixed_identity(old, payload)
-                                }
-                                JournalPhase::Committed => {
-                                    fingerprint_matches_identity(old, &payload.new_note)
-                                }
-                                JournalPhase::Empty | JournalPhase::Preparing => false,
-                            }
                     }
                     _ => false,
                 }
@@ -252,68 +246,15 @@ fn held_marker_matches(file: &File, expected: &[u8]) -> bool {
 }
 
 fn valid_fingerprint(value: &fs::FileFingerprint) -> bool {
-    value.device != 0
-        && value.inode != 0
-        && value.links == 1
-        && value.sha256.len() == 64
+    value.sha256.len() == 64
         && value
             .sha256
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
-fn same_fingerprint_identity(left: &fs::FileFingerprint, right: &fs::FileFingerprint) -> bool {
-    left.device == right.device && left.inode == right.inode
-}
-
-fn fingerprint_matches_identity(
-    fingerprint: &fs::FileFingerprint,
-    identity: &fs::FileIdentity,
-) -> bool {
-    fingerprint.device == identity.device && fingerprint.inode == identity.inode
-}
-
-fn fingerprint_matches_any_fixed_identity(
-    fingerprint: &fs::FileFingerprint,
-    payload: &JournalPayload,
-) -> bool {
-    [
-        &payload.owner,
-        &payload.journal_a,
-        &payload.journal_b,
-        &payload.new_note,
-        &payload.old_backup,
-    ]
-    .into_iter()
-    .chain(payload.media.values())
-    .any(|identity| fingerprint_matches_identity(fingerprint, identity))
-}
-
 fn same_content(left: &fs::FileFingerprint, right: &fs::FileFingerprint) -> bool {
     left.size == right.size && left.sha256 == right.sha256
-}
-
-fn valid_identity(value: &fs::FileIdentity) -> bool {
-    value.device != 0 && value.inode != 0
-}
-
-fn fixed_identities_are_distinct(payload: &JournalPayload) -> bool {
-    let mut identities = BTreeSet::new();
-    for identity in [
-        &payload.owner,
-        &payload.journal_a,
-        &payload.journal_b,
-        &payload.new_note,
-        &payload.old_backup,
-    ]
-    .into_iter()
-    .chain(payload.media.values())
-    {
-        if !valid_identity(identity) || !identities.insert((identity.device, identity.inode)) {
-            return false;
-        }
-    }
-    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -353,6 +294,8 @@ fn fixed_payload(
 
 fn initialize_slot(
     root: &OwnedFd,
+    shared_workspace: &OwnedFd,
+    writer_id: &str,
     workspace: &OwnedFd,
     workspace_owner: &File,
     index: usize,
@@ -401,6 +344,8 @@ fn initialize_slot(
     Ok(Slot {
         index,
         root: root.try_clone().map_err(|_| VaultError::Io)?,
+        shared_workspace: shared_workspace.try_clone().map_err(|_| VaultError::Io)?,
+        writer_id: writer_id.to_owned(),
         workspace: workspace.try_clone().map_err(|_| VaultError::Io)?,
         workspace_owner: workspace_owner.try_clone().map_err(|_| VaultError::Io)?,
         directory,
@@ -419,6 +364,8 @@ fn initialize_slot(
 }
 
 fn open_slot(
+    shared_workspace: &OwnedFd,
+    writer_id: &str,
     workspace: &OwnedFd,
     workspace_owner: &File,
     destination: &OwnedFd,
@@ -508,6 +455,8 @@ fn open_slot(
     let slot = Slot {
         index,
         root: destination.try_clone().map_err(|_| VaultError::Io)?,
+        shared_workspace: shared_workspace.try_clone().map_err(|_| VaultError::Io)?,
+        writer_id: writer_id.to_owned(),
         workspace: workspace.try_clone().map_err(|_| VaultError::Io)?,
         workspace_owner: workspace_owner.try_clone().map_err(|_| VaultError::Io)?,
         directory,
@@ -527,12 +476,41 @@ fn open_slot(
 }
 
 impl Workspace {
+    #[cfg(test)]
     pub(super) fn open(destination: &OwnedFd) -> Result<Self, VaultError> {
-        let exists =
+        Self::open_for_writer(destination, DEFAULT_WRITER_ID)
+    }
+
+    pub(super) fn open_for_writer(
+        destination: &OwnedFd,
+        writer_id: &str,
+    ) -> Result<Self, VaultError> {
+        if !valid_writer_id(writer_id) {
+            return Err(VaultError::UnsafeChild);
+        }
+        let root_exists =
             fs::child_exists(destination, WORKSPACE_NAME).map_err(|_| VaultError::UnsafeChild)?;
-        let (directory, created) =
+        let (shared_workspace, root_created) =
             fs::open_or_create_persistent_child_directory(destination, WORKSPACE_NAME)?;
-        if exists && created {
+        if root_exists && root_created {
+            return Err(VaultError::UnsafeChild);
+        }
+        let mut root_owner = if root_created {
+            create_fixed_file(&shared_workspace, WORKSPACE_OWNER, ROOT_MARKER)?
+        } else {
+            fs::open_regular_file(&shared_workspace, WORKSPACE_OWNER)?
+        };
+        if !read_exact_marker(&mut root_owner, ROOT_MARKER)
+            || !root_layout_is_safe(&shared_workspace)?
+            || !fs::child_directory_matches(destination, WORKSPACE_NAME, &shared_workspace)?
+        {
+            return Err(VaultError::UnsafeChild);
+        }
+        let writer_exists =
+            fs::child_exists(&shared_workspace, writer_id).map_err(|_| VaultError::UnsafeChild)?;
+        let (directory, created) =
+            fs::open_or_create_persistent_child_directory(&shared_workspace, writer_id)?;
+        if writer_exists && created {
             return Err(VaultError::UnsafeChild);
         }
         if created {
@@ -540,13 +518,20 @@ impl Workspace {
             fs::sync_owned_directory(&directory)?;
             let mut slots = Vec::with_capacity(SLOT_COUNT);
             for index in 0..SLOT_COUNT {
-                slots.push(initialize_slot(destination, &directory, &owner, index)?);
+                slots.push(initialize_slot(
+                    destination,
+                    &shared_workspace,
+                    writer_id,
+                    &directory,
+                    &owner,
+                    index,
+                )?);
             }
             fs::sync_owned_directory(&directory)?;
             return Ok(Self { slots });
         }
         let owner = fs::open_regular_file(&directory, WORKSPACE_OWNER)?;
-        if !workspace_authority_is_valid(destination, &directory, &owner)? {
+        if !workspace_authority_is_valid(&shared_workspace, writer_id, &directory, &owner)? {
             return Err(VaultError::UnsafeChild);
         }
         // Opening a slot is strictly inspection: no scratch reset, rename, or
@@ -558,7 +543,14 @@ impl Workspace {
         let mut inspected = Vec::with_capacity(SLOT_COUNT);
         let mut idle_rebinds = Vec::with_capacity(SLOT_COUNT);
         for index in 0..SLOT_COUNT {
-            match open_slot(&directory, &owner, destination, index) {
+            match open_slot(
+                &shared_workspace,
+                writer_id,
+                &directory,
+                &owner,
+                destination,
+                index,
+            ) {
                 Ok(slot) if slot.inspect_authority(destination)? => inspected.push(slot),
                 Ok(slot) if slot.can_rebind_empty_scratch()? => idle_rebinds.push(slot),
                 Ok(_) => {}
@@ -611,13 +603,31 @@ fn workspace_layout_is_exact(directory: &OwnedFd) -> Result<bool, VaultError> {
     Ok(actual == expected)
 }
 
+fn root_layout_is_safe(directory: &OwnedFd) -> Result<bool, VaultError> {
+    for name in fs::direct_children_strict(directory)? {
+        if name == WORKSPACE_OWNER {
+            continue;
+        }
+        if !valid_writer_id(&name) || fs::open_child_directory(directory, &name).is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn root_authority_is_valid(directory: &OwnedFd) -> Result<bool, VaultError> {
+    let owner = fs::open_regular_file(directory, WORKSPACE_OWNER)?;
+    Ok(root_layout_is_safe(directory)? && held_marker_matches(&owner, ROOT_MARKER))
+}
+
 fn workspace_authority_is_valid(
-    destination: &OwnedFd,
+    shared_workspace: &OwnedFd,
+    writer_id: &str,
     directory: &OwnedFd,
     owner: &File,
 ) -> Result<bool, VaultError> {
     Ok(workspace_layout_is_exact(directory)?
-        && fs::child_directory_matches(destination, WORKSPACE_NAME, directory)?
+        && fs::child_directory_matches(shared_workspace, writer_id, directory)?
         && fs::regular_path_matches_open_file(directory, WORKSPACE_OWNER, owner)?
         && held_marker_matches(owner, WORKSPACE_MARKER))
 }
@@ -642,25 +652,7 @@ impl Slot {
     }
 
     fn journal_fixed_authority_matches(&self) -> Result<bool, VaultError> {
-        let new_note_matches = match &self.new_note {
-            Some(file) => {
-                let current = fs::identity_open_regular_file(file)?;
-                self.journal.phase == JournalPhase::ExchangePending
-                    || self.journal.new_note == current
-            }
-            None => journal_allows_missing_new_note(&self.journal),
-        };
-        Ok(new_note_matches
-            && self.journal.owner == fs::identity_open_regular_file(&self.owner)?
-            && self.journal.journal_a == fs::identity_open_regular_file(&self.journal_a)?
-            && self.journal.journal_b == fs::identity_open_regular_file(&self.journal_b)?
-            && self.journal.old_backup == fs::identity_open_regular_file(&self.old_backup)?
-            && self.journal.media
-                == self
-                    .media
-                    .iter()
-                    .map(|(index, file)| Ok((*index, fs::identity_open_regular_file(file)?)))
-                    .collect::<Result<BTreeMap<_, _>, VaultError>>()?)
+        Ok(self.new_note.is_some() || journal_allows_missing_new_note(&self.journal))
     }
 
     fn fixed_paths_match(&self, allows_missing_new_note: bool) -> Result<bool, VaultError> {
@@ -669,7 +661,13 @@ impl Slot {
             None => allows_missing_new_note,
         };
         Ok(self.current_layout_is_exact(allows_missing_new_note)?
-            && fs::child_directory_matches(&self.root, WORKSPACE_NAME, &self.workspace)?
+            && fs::child_directory_matches(&self.root, WORKSPACE_NAME, &self.shared_workspace)?
+            && root_authority_is_valid(&self.shared_workspace)?
+            && fs::child_directory_matches(
+                &self.shared_workspace,
+                &self.writer_id,
+                &self.workspace,
+            )?
             && fs::regular_path_matches_open_file(
                 &self.workspace,
                 WORKSPACE_OWNER,
@@ -702,19 +700,14 @@ impl Slot {
                 else {
                     return false;
                 };
-                let target_state = note_state(
-                    destination,
-                    target,
-                    self.journal.old.as_ref(),
-                    self.journal.backup.as_ref(),
-                    new,
-                );
+                let target_state =
+                    note_state(destination, target, self.journal.old.as_ref(), None, new);
                 let staged_state = match &self.new_note {
                     Some(_) => note_state(
                         &self.directory,
                         NEW_NOTE,
                         self.journal.old.as_ref(),
-                        self.journal.backup.as_ref(),
+                        None,
                         new,
                     ),
                     None => NoteState::Missing,
@@ -727,9 +720,9 @@ impl Slot {
                         (target_state, staged_state),
                         (NoteState::Missing, NoteState::New) | (NoteState::New, NoteState::Missing)
                     ),
-                    (Some(old), Some(backup)) => {
+                    (Some(_old), Some(backup)) => {
                         let backup_state =
-                            note_state(&self.directory, OLD_BACKUP, Some(old), Some(backup), new);
+                            note_state(&self.directory, OLD_BACKUP, None, Some(backup), new);
                         !matches!(backup_state, NoteState::Unsafe)
                             && backup_state == NoteState::Backup
                             && matches!(staged_state, NoteState::New | NoteState::Old)
@@ -743,26 +736,16 @@ impl Slot {
                 else {
                     return false;
                 };
-                if note_state(
-                    destination,
-                    target,
-                    self.journal.old.as_ref(),
-                    self.journal.backup.as_ref(),
-                    new,
-                ) != NoteState::New
+                if note_state(destination, target, self.journal.old.as_ref(), None, new)
+                    != NoteState::New
                 {
                     return false;
                 }
                 match self.journal.old.as_ref() {
                     Some(old) => {
                         self.new_note.as_ref().is_some()
-                            && note_state(
-                                &self.directory,
-                                NEW_NOTE,
-                                Some(old),
-                                self.journal.backup.as_ref(),
-                                new,
-                            ) == NoteState::Old
+                            && note_state(&self.directory, NEW_NOTE, Some(old), None, new)
+                                == NoteState::Old
                     }
                     None => self.new_note.is_some(),
                 }
@@ -808,13 +791,8 @@ impl Slot {
                     .as_deref()
                     .ok_or(VaultError::UnsafeChild)?;
                 let new = self.journal.new.as_ref().ok_or(VaultError::UnsafeChild)?;
-                if note_state(
-                    destination,
-                    target,
-                    self.journal.old.as_ref(),
-                    self.journal.backup.as_ref(),
-                    new,
-                ) != NoteState::New
+                if note_state(destination, target, self.journal.old.as_ref(), None, new)
+                    != NoteState::New
                     || !self.verify_fixed_paths()?
                 {
                     self.quarantine();
@@ -831,15 +809,9 @@ impl Slot {
         let new = self.journal.new.clone().ok_or(VaultError::UnsafeChild)?;
         let old = self.journal.old.clone();
         let backup = self.journal.backup.clone();
-        let target_state = note_state(destination, &target, old.as_ref(), backup.as_ref(), &new);
+        let target_state = note_state(destination, &target, old.as_ref(), None, &new);
         let staged_state = match self.new_note.as_ref() {
-            Some(_) => note_state(
-                &self.directory,
-                NEW_NOTE,
-                old.as_ref(),
-                backup.as_ref(),
-                &new,
-            ),
+            Some(_) => note_state(&self.directory, NEW_NOTE, old.as_ref(), None, &new),
             None => NoteState::Missing,
         };
         if target_state == NoteState::Unsafe || staged_state == NoteState::Unsafe {
@@ -863,7 +835,7 @@ impl Slot {
         }
         let old = old.ok_or(VaultError::UnsafeChild)?;
         let backup = backup.ok_or(VaultError::UnsafeChild)?;
-        let backup_state = note_state(&self.directory, OLD_BACKUP, Some(&old), Some(&backup), &new);
+        let backup_state = note_state(&self.directory, OLD_BACKUP, None, Some(&backup), &new);
         if backup_state == NoteState::Unsafe {
             self.quarantine();
             return Err(VaultError::UnsafeChild);
@@ -988,17 +960,15 @@ impl Slot {
         backup: &fs::FileFingerprint,
         new: &fs::FileFingerprint,
     ) -> Result<bool, VaultError> {
-        if note_state(destination, target, Some(old), Some(backup), new) == NoteState::Old {
+        if note_state(destination, target, Some(old), None, new) == NoteState::Old {
             self.quarantine();
             return Ok(true);
         }
-        if note_state(&self.directory, OLD_BACKUP, Some(old), Some(backup), new)
-            != NoteState::Backup
-        {
+        if note_state(&self.directory, OLD_BACKUP, None, Some(backup), new) != NoteState::Backup {
             self.quarantine();
             return Ok(false);
         }
-        match note_state(destination, target, Some(old), Some(backup), new) {
+        match note_state(destination, target, Some(old), None, new) {
             NoteState::Missing => {
                 fs::rename_no_replace_between(&self.directory, OLD_BACKUP, destination, target)?
             }
@@ -1014,7 +984,7 @@ impl Slot {
             NoteState::Old => unreachable!(),
         }
         self.quarantine();
-        Ok(note_state(destination, target, Some(old), Some(backup), new) == NoteState::Backup)
+        Ok(note_state(destination, target, Some(backup), None, new) == NoteState::Old)
     }
 
     pub(super) fn begin(&mut self) -> Result<(), VaultError> {
@@ -1140,8 +1110,8 @@ impl Slot {
         expected: &fs::FileFingerprint,
     ) -> Result<(), VaultError> {
         let mut file = fs::open_regular_file_for_update(&self.directory, NEW_NOTE)?;
-        if fs::fingerprint_open_regular_file(&mut file)? != *expected
-            || !fs::regular_file_matches_fingerprint(&self.directory, NEW_NOTE, expected)?
+        if !same_content(&fs::fingerprint_open_regular_file(&mut file)?, expected)
+            || !fs::regular_path_matches_open_file(&self.directory, NEW_NOTE, &file)?
         {
             self.quarantine();
             return Err(VaultError::UnsafeChild);
@@ -1301,7 +1271,10 @@ mod tests {
         drop(slot);
         drop(destination);
 
-        let workspace = path.join(WORKSPACE_NAME).join("slot-0");
+        let workspace = path
+            .join(WORKSPACE_NAME)
+            .join(DEFAULT_WRITER_ID)
+            .join("slot-0");
         let target = path.join("Article.md");
         let backup = workspace.join(OLD_BACKUP);
         stdfs::rename(&target, path.join("displaced-article")).unwrap();
@@ -1349,7 +1322,11 @@ mod tests {
         stdfs::rename(&target, path.join("displaced-article")).unwrap();
         stdfs::write(&outside, b"outside").unwrap();
         symlink(&outside, &target).unwrap();
-        let backup = path.join(WORKSPACE_NAME).join("slot-0").join(OLD_BACKUP);
+        let backup = path
+            .join(WORKSPACE_NAME)
+            .join(DEFAULT_WRITER_ID)
+            .join("slot-0")
+            .join(OLD_BACKUP);
         let backup_before = stdfs::read(&backup).unwrap();
 
         // The target is a deliberately recoverable opaque substitute. The
@@ -1384,7 +1361,10 @@ mod tests {
         drop(slot);
         drop(destination);
         stdfs::write(
-            path.join(WORKSPACE_NAME).join("slot-0").join(JOURNAL_A),
+            path.join(WORKSPACE_NAME)
+                .join(DEFAULT_WRITER_ID)
+                .join("slot-0")
+                .join(JOURNAL_A),
             b"torn",
         )
         .unwrap();
@@ -1405,9 +1385,14 @@ mod tests {
         let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
         slot.begin().unwrap();
         slot.write_new_note(b"earlier staged note").unwrap();
-        let first_scratch = path.join(WORKSPACE_NAME).join("slot-0").join(NEW_NOTE);
+        let first_scratch = path
+            .join(WORKSPACE_NAME)
+            .join(DEFAULT_WRITER_ID)
+            .join("slot-0")
+            .join(NEW_NOTE);
         let later_owner = path
             .join(WORKSPACE_NAME)
+            .join(DEFAULT_WRITER_ID)
             .join("slot-3")
             .join(WORKSPACE_OWNER);
         drop(slot);
@@ -1435,7 +1420,10 @@ mod tests {
         slot.begin().unwrap();
         let target = path.join("Article.md");
         let displaced = path.join("displaced-article");
-        let slot_path = path.join(WORKSPACE_NAME).join("slot-0");
+        let slot_path = path
+            .join(WORKSPACE_NAME)
+            .join(DEFAULT_WRITER_ID)
+            .join("slot-0");
         let backup_path = slot_path.join(OLD_BACKUP);
         let new_note_path = slot_path.join(NEW_NOTE);
         stdfs::write(&target, b"old").unwrap();
@@ -1515,7 +1503,11 @@ mod tests {
             Some(new),
         )
         .unwrap();
-        let backup_path = path.join(WORKSPACE_NAME).join("slot-0").join(OLD_BACKUP);
+        let backup_path = path
+            .join(WORKSPACE_NAME)
+            .join(DEFAULT_WRITER_ID)
+            .join("slot-0")
+            .join(OLD_BACKUP);
         stdfs::rename(&target, &displaced).unwrap();
         stdfs::write(&outside, b"outside").unwrap();
         symlink(&outside, &target).unwrap();
@@ -1559,7 +1551,10 @@ mod tests {
         drop(Workspace::open(&destination).unwrap());
         drop(destination);
         for index in 0..SLOT_COUNT {
-            let slot = path.join(WORKSPACE_NAME).join(format!("slot-{index}"));
+            let slot = path
+                .join(WORKSPACE_NAME)
+                .join(DEFAULT_WRITER_ID)
+                .join(format!("slot-{index}"));
             stdfs::write(slot.join(JOURNAL_A), b"bad-a").unwrap();
             stdfs::write(slot.join(JOURNAL_B), b"bad-b").unwrap();
         }
@@ -1570,7 +1565,10 @@ mod tests {
         ));
         drop(destination);
         for index in 0..SLOT_COUNT {
-            let slot = path.join(WORKSPACE_NAME).join(format!("slot-{index}"));
+            let slot = path
+                .join(WORKSPACE_NAME)
+                .join(DEFAULT_WRITER_ID)
+                .join(format!("slot-{index}"));
             assert_eq!(stdfs::read(slot.join(JOURNAL_A)).unwrap(), b"bad-a");
             assert_eq!(stdfs::read(slot.join(JOURNAL_B)).unwrap(), b"bad-b");
         }
@@ -1585,7 +1583,10 @@ mod tests {
         drop(destination);
 
         for index in 0..SLOT_COUNT {
-            let slot = path.join(WORKSPACE_NAME).join(slot_name(index));
+            let slot = path
+                .join(WORKSPACE_NAME)
+                .join(DEFAULT_WRITER_ID)
+                .join(slot_name(index));
             for name in [WORKSPACE_OWNER, JOURNAL_A, JOURNAL_B, NEW_NOTE, OLD_BACKUP] {
                 replace_regular_file(&slot.join(name));
             }
@@ -1603,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn preparing_slot_with_recreated_scratch_files_stays_quarantined() {
+    fn preparing_slot_with_safe_recreated_scratch_files_recovers_for_its_writer() {
         let path = temp();
         let destination = fs::open_destination(&path).unwrap();
         let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
@@ -1612,19 +1613,17 @@ mod tests {
         drop(slot);
         drop(destination);
 
-        let slot_path = path.join(WORKSPACE_NAME).join(slot_name(0));
+        let slot_path = path
+            .join(WORKSPACE_NAME)
+            .join(DEFAULT_WRITER_ID)
+            .join(slot_name(0));
         for name in [WORKSPACE_OWNER, JOURNAL_A, JOURNAL_B, NEW_NOTE, OLD_BACKUP] {
             replace_regular_file(&slot_path.join(name));
         }
-        let staged_before = stdfs::read(slot_path.join(NEW_NOTE)).unwrap();
-
         let destination = fs::open_destination(&path).unwrap();
         let next = Workspace::open(&destination).unwrap().claim().unwrap();
-        assert_eq!(next.index(), 1);
-        assert_eq!(
-            stdfs::read(slot_path.join(NEW_NOTE)).unwrap(),
-            staged_before
-        );
+        assert_eq!(next.index(), 0);
+        assert_eq!(stdfs::read(slot_path.join(NEW_NOTE)).unwrap(), b"");
         drop(next);
         drop(destination);
         stdfs::remove_dir_all(path).unwrap();
@@ -1646,7 +1645,10 @@ mod tests {
             drop(slot);
             drop(destination);
             stdfs::write(
-                path.join(WORKSPACE_NAME).join("slot-0").join(JOURNAL_A),
+                path.join(WORKSPACE_NAME)
+                    .join(DEFAULT_WRITER_ID)
+                    .join("slot-0")
+                    .join(JOURNAL_A),
                 encode_journal(invalid).unwrap(),
             )
             .unwrap();
@@ -1661,7 +1663,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_semantics_reject_old_backup_alias_content_and_link_count_mismatches() {
+    fn journal_semantics_require_portable_matching_old_and_backup_content() {
         let path = temp();
         let destination = fs::open_destination(&path).unwrap();
         let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
@@ -1687,13 +1689,6 @@ mod tests {
             links: 1,
         };
 
-        payload.old = Some(old.clone());
-        payload.backup = Some(old.clone());
-        assert!(
-            !valid_journal_semantics(&payload),
-            "old and backup must never identify the same inode"
-        );
-
         payload.backup = Some(fs::FileFingerprint {
             sha256: "b".repeat(64),
             ..distinct_backup.clone()
@@ -1713,14 +1708,8 @@ mod tests {
         );
 
         payload.backup = Some(distinct_backup.clone());
-        payload.old = Some(fs::FileFingerprint {
-            links: 2,
-            ..old.clone()
-        });
-        assert!(
-            !valid_journal_semantics(&payload),
-            "journal fingerprints require one visible link"
-        );
+        payload.old = Some(old.clone());
+        assert!(valid_journal_semantics(&payload));
 
         payload.old = None;
         assert!(
@@ -1730,10 +1719,7 @@ mod tests {
 
         payload.old = Some(old);
         payload.phase = JournalPhase::Committed;
-        assert!(
-            !valid_journal_semantics(&payload),
-            "a committed new note must no longer identify the fixed new-note child"
-        );
+        assert!(valid_journal_semantics(&payload));
 
         payload.phase = JournalPhase::Preparing;
         assert!(
@@ -1747,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_semantics_bind_phase_fingerprints_to_fixed_files() {
+    fn journal_semantics_ignore_machine_local_fingerprint_identity() {
         let path = temp();
         let destination = fs::open_destination(&path).unwrap();
         let mut slot = Workspace::open(&destination).unwrap().claim().unwrap();
@@ -1772,10 +1758,7 @@ mod tests {
         let mut forged_backup = backup.clone();
         forged_backup.inode = alternate_inode(backup.inode, &[old.inode, new.inode]);
         exchange_pending.backup = Some(forged_backup);
-        assert!(
-            !valid_journal_semantics(&exchange_pending),
-            "exchange-pending backups must identify the fixed old-backup file"
-        );
+        assert!(valid_journal_semantics(&exchange_pending));
 
         fs::rename_exchange_between(&slot.directory, NEW_NOTE, &destination, "Article.md").unwrap();
         slot.reopen_new_note(&old).unwrap();
@@ -1793,10 +1776,7 @@ mod tests {
         let mut forged_old = old.clone();
         forged_old.inode = alternate_inode(old.inode, &[backup.inode, new.inode]);
         committed.old = Some(forged_old);
-        assert!(
-            !valid_journal_semantics(&committed),
-            "committed old notes must identify the fixed new-note file"
-        );
+        assert!(valid_journal_semantics(&committed));
 
         drop(slot);
         drop(destination);
@@ -1823,7 +1803,10 @@ mod tests {
         impossible.new = Some(new);
         let journal = encode_journal(impossible).unwrap();
         fs::reset_file(&mut slot.journal_b, &journal).unwrap();
-        let slot_path = path.join(WORKSPACE_NAME).join("slot-0");
+        let slot_path = path
+            .join(WORKSPACE_NAME)
+            .join(DEFAULT_WRITER_ID)
+            .join("slot-0");
         drop(slot);
         drop(destination);
 
@@ -1879,7 +1862,10 @@ mod tests {
                 Some(new),
             )
             .unwrap();
-            let slot_path = path.join(WORKSPACE_NAME).join("slot-0");
+            let slot_path = path
+                .join(WORKSPACE_NAME)
+                .join(DEFAULT_WRITER_ID)
+                .join("slot-0");
 
             match substitute {
                 Substitute::Regular => {
@@ -1972,7 +1958,10 @@ mod tests {
         slot.write_new_note(b"new").unwrap();
         let mut old = fs::open_regular_file(&destination, "Article.md").unwrap();
         slot.copy_old_note(&mut old).unwrap();
-        let slot_path = path.join(WORKSPACE_NAME).join("slot-0");
+        let slot_path = path
+            .join(WORKSPACE_NAME)
+            .join(DEFAULT_WRITER_ID)
+            .join("slot-0");
         drop(old);
         drop(slot);
         drop(destination);
@@ -2007,7 +1996,10 @@ mod tests {
             Some(new),
         )
         .unwrap();
-        let slot_path = path.join(WORKSPACE_NAME).join("slot-0");
+        let slot_path = path
+            .join(WORKSPACE_NAME)
+            .join(DEFAULT_WRITER_ID)
+            .join("slot-0");
         drop(slot);
         drop(destination);
 
@@ -2041,7 +2033,11 @@ mod tests {
             .unwrap();
             fs::rename_no_replace_between(&slot.directory, NEW_NOTE, &destination, "Created.md")
                 .unwrap();
-            let fixed = path.join(WORKSPACE_NAME).join("slot-0").join(NEW_NOTE);
+            let fixed = path
+                .join(WORKSPACE_NAME)
+                .join(DEFAULT_WRITER_ID)
+                .join("slot-0")
+                .join(NEW_NOTE);
             if committed {
                 slot.recreate_new_note().unwrap();
                 slot.persist(
@@ -2088,7 +2084,10 @@ mod tests {
         drop(slot);
         drop(destination);
         stdfs::write(
-            path.join(WORKSPACE_NAME).join("slot-0").join(JOURNAL_A),
+            path.join(WORKSPACE_NAME)
+                .join(DEFAULT_WRITER_ID)
+                .join("slot-0")
+                .join(JOURNAL_A),
             encode_journal(invalid).unwrap(),
         )
         .unwrap();

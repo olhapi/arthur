@@ -8,6 +8,7 @@ import { CHROME_WEB_STORE_EXTENSION_ID, CHROMIUM_EXTENSION_ID } from "./identity
 
 export const NATIVE_HOST_NAME = "com.olhapi.arthur";
 export const FIREFOX_EXTENSION_ID = "arthur@olhapi.com";
+const WRITER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\n$/;
 const APP_SUPPORT = ["Library", "Application Support"];
 
 function requiredAbsolute(value, label) {
@@ -25,6 +26,7 @@ export function nativeHostTargets({ home, platform, targets } = {}) {
   const support = path.join(resolvedHome, ...APP_SUPPORT);
   const expected = {
     binary: path.join(support, "Arthur", "native-host", "arthur-native-host"),
+    writerId: path.join(support, "Arthur", "state", "writer-id"),
     chrome: path.join(support, "Google", "Chrome", "NativeMessagingHosts", `${NATIVE_HOST_NAME}.json`),
     edge: path.join(support, "Microsoft Edge", "NativeMessagingHosts", `${NATIVE_HOST_NAME}.json`),
     firefox: path.join(support, "Mozilla", "NativeMessagingHosts", `${NATIVE_HOST_NAME}.json`),
@@ -37,6 +39,24 @@ export function nativeHostTargets({ home, platform, targets } = {}) {
     }
   }
   return expected;
+}
+
+export async function readWriterIdentity(fs, pathname) {
+  const stat = await fs.lstat(pathname);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Arthur writer identity must be a regular non-symlink file.");
+  if ((stat.mode & 0o777) !== 0o600) throw new Error("Arthur writer identity must have mode 0600.");
+  const value = await fs.readFile(pathname, "utf8");
+  if (!WRITER_ID.test(value)) throw new Error("Arthur writer identity is malformed.");
+  return value;
+}
+
+async function existingWriterIdentity(fs, pathname) {
+  try {
+    return await readWriterIdentity(fs, pathname);
+  } catch (error) {
+    if (missing(error)) return undefined;
+    throw error;
+  }
 }
 
 export async function canonicalizeHome(fs, home) {
@@ -115,11 +135,13 @@ export async function buildInstallPlan({
     throw new Error("Release native binary is missing.");
   }
   for (const target of Object.values(expected)) await assertRegularNonSymlink(fs, target, "Installed native-host target");
+  const writerIdentity = await existingWriterIdentity(fs, expected.writerId) ?? `${randomUUID()}\n`;
   return {
     home: canonicalHome,
     platform,
     targets: expected,
     payloads: [{ source, destination: expected.binary, mode: 0o755 }],
+    writerIdentity: { destination: expected.writerId, value: writerIdentity, mode: 0o600 },
     manifests: [
       { destination: expected.chrome, contents: manifest(expected.binary, "chromium") },
       { destination: expected.edge, contents: manifest(expected.binary, "chromium") },
@@ -206,7 +228,7 @@ async function atomicJson(fs, home, destination, contents) {
 }
 
 export async function applyInstallPlan(plan, { fs = nodeFs, home, platform } = {}) {
-  if (!plan || !Array.isArray(plan.payloads) || plan.payloads.length !== 1 || !Array.isArray(plan.manifests) || plan.manifests.length !== 3) {
+  if (!plan || !Array.isArray(plan.payloads) || plan.payloads.length !== 1 || !Array.isArray(plan.manifests) || plan.manifests.length !== 3 || !plan.writerIdentity) {
     throw new TypeError("Install plan must contain exactly one payload and three manifests.");
   }
   const canonicalHome = await canonicalizeHome(fs, home);
@@ -215,14 +237,22 @@ export async function applyInstallPlan(plan, { fs = nodeFs, home, platform } = {
   const expectedDestinations = [expectedTargets.binary, expectedTargets.chrome, expectedTargets.edge, expectedTargets.firefox];
   if (
     !payload || payload.mode !== 0o755 || payload.destination !== expectedTargets.binary ||
+    plan.writerIdentity.destination !== expectedTargets.writerId || plan.writerIdentity.mode !== 0o600 || !WRITER_ID.test(plan.writerIdentity.value) ||
     plan.manifests.some((entry, index) => entry.destination !== expectedDestinations[index + 1]) ||
     JSON.stringify(plan.manifests[0]?.contents) !== JSON.stringify(manifest(expectedTargets.binary, "chromium")) ||
     JSON.stringify(plan.manifests[1]?.contents) !== JSON.stringify(manifest(expectedTargets.binary, "chromium")) ||
     JSON.stringify(plan.manifests[2]?.contents) !== JSON.stringify(manifest(expectedTargets.binary, "firefox"))
   ) throw new Error("Install plan contains a target outside Arthur's exact allowlist.");
   if (!(await assertRegularNonSymlink(fs, payload.source, "Release native binary"))) throw new Error("Release native binary is missing.");
+  const installedWriterIdentity = await existingWriterIdentity(fs, expectedTargets.writerId);
+  if (installedWriterIdentity !== undefined && installedWriterIdentity !== plan.writerIdentity.value) {
+    throw new Error("Arthur writer identity changed during installation.");
+  }
   await atomicCopy(fs, canonicalHome, payload.source, payload.destination, payload.mode);
   for (const entry of plan.manifests) await atomicJson(fs, canonicalHome, entry.destination, entry.contents);
+  if (installedWriterIdentity === undefined) {
+    await atomicWrite(fs, canonicalHome, expectedTargets.writerId, Buffer.from(plan.writerIdentity.value), 0o600, "Arthur writer identity");
+  }
 }
 
 async function main({ argv, env, platform, fs, repositoryPath }) {
