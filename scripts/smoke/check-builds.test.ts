@@ -32,7 +32,7 @@ async function buildFixture(
     const manifest: Record<string, any> = {
       manifest_version: target.manifestVersion,
       name: "Arthur — Article Saver",
-      version: "0.1.1",
+      version: "0.1.2",
       description: "Save the rendered article you are reading as clean, local Markdown.",
       homepage_url: "https://olhapi.github.io/arthur/",
       permissions: target.manifestVersion === 3
@@ -65,7 +65,7 @@ async function buildChromeStoreFixture({ includeKey = false } = {}) {
   await writeFile(path.join(artifact, "manifest.json"), JSON.stringify({
     manifest_version: 3,
     name: "Arthur — Article Saver",
-    version: "0.1.1",
+    version: "0.1.2",
     description: "Save the rendered article you are reading as clean, local Markdown.",
     homepage_url: "https://olhapi.github.io/arthur/",
     permissions: ["activeTab", "storage", "nativeMessaging", "downloads"],
@@ -90,10 +90,10 @@ async function buildStoreZipFixture(mutator?: (target: string, manifest: Record<
   const browserRoot = await buildFixture(mutator);
   const root = await mkdtemp(path.join(tmpdir(), "arthur-store-zips-"));
   const packagePath = path.join(root, "package.json");
-  await writeFile(packagePath, JSON.stringify({ version: "0.1.1" }));
+  await writeFile(packagePath, JSON.stringify({ version: "0.1.2" }));
   const archives: Array<readonly [string, string]> = [
-    [path.join(chromeRoot, "chrome-mv3-store"), "arthur-0.1.1-chrome-store.zip"],
-    [path.join(browserRoot, "firefox-mv2"), "arthur-0.1.1-firefox.zip"],
+    [path.join(chromeRoot, "chrome-mv3-store"), "arthur-0.1.2-chrome-store.zip"],
+    [path.join(browserRoot, "firefox-mv2"), "arthur-0.1.2-firefox.zip"],
   ];
   for (const [directory, name] of archives) {
     const zip = spawnSync("/usr/bin/zip", ["-qr", path.join(root, name), "."], { cwd: directory });
@@ -116,7 +116,7 @@ describe("check-builds", () => {
   it("requires Arthur's public marketplace identity instead of package defaults", async () => {
     const publicMetadata = await buildFixture((_target, manifest) => {
       manifest.name = "Arthur — Article Saver";
-      manifest.version = "0.1.1";
+      manifest.version = "0.1.2";
       manifest.description = "Save the rendered article you are reading as clean, local Markdown.";
       manifest.homepage_url = "https://olhapi.github.io/arthur/";
     });
@@ -169,8 +169,8 @@ describe("check-builds", () => {
     const fixture = await buildStoreZipFixture();
     await expect(validateStoreZipArtifacts(fixture)).resolves.toMatchObject({
       storeArchives: [
-        { name: "arthur-0.1.1-chrome-store.zip", target: "chrome" },
-        { name: "arthur-0.1.1-firefox.zip", target: "firefox" },
+        { name: "arthur-0.1.2-chrome-store.zip", target: "chrome" },
+        { name: "arthur-0.1.2-firefox.zip", target: "firefox" },
       ],
     });
   });
