@@ -1,4 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Arthur saved the article">
-  <rect x="14" y="14" width="100" height="100" rx="28" fill="#16875D"/>
-  <path d="m37 65 17 17 38-41" fill="none" stroke="#FFF" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <g transform="translate(64 64) scale(1.28) translate(-64 -64)">
+    <rect x="14" y="14" width="100" height="100" rx="28" fill="#16875D"/>
+    <path d="m37 65 17 17 38-41" fill="none" stroke="#FFF" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
 </svg>
