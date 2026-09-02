@@ -7,6 +7,14 @@ import { finalizeMarkdown, htmlToMarkdown } from "./markdown.js";
 const mediaId = "7f9b5e81-4e80-4b7b-9ac5-c5d54f88b832";
 
 describe("htmlToMarkdown", () => {
+  it("encodes tag-shaped prose placeholders instead of emitting inline HTML", () => {
+    expect(
+      htmlToMarkdown(
+        "<p>I heard you’re working on... Mind sharing how you approached \\&lt;x&gt;?</p><p><code>&lt;x&gt;</code></p>",
+      ),
+    ).toBe("I heard you’re working on... Mind sharing how you approached &lt;x&gt;?\n\n`<x>`");
+  });
+
   it("omits empty blockquotes embedded in list items", () => {
     expect(
       htmlToMarkdown(`
